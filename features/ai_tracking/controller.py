@@ -60,12 +60,15 @@ class TrackingWorker(QObject):
             shutil.rmtree(self._temp_subset_dir, ignore_errors=True)
         self._temp_subset_dir = None
 
-    def _load_frames_from_media_input(self, start_frame: int, end_frame: int):
-        """요청한 프레임 범위만 임시 폴더로 모아 트랙킹 입력을 준비한다."""
+    # 여기서부터 수정하고: 정방향/역방향 frame index 목록을 그대로 임시 트랙킹 입력으로 준비하게 했다.
+    def _load_frames_from_media_input(self, frame_indices: List[int]):
+        """요청한 프레임 순서대로 임시 폴더를 만들어 트랙킹 입력을 준비한다."""
         self._cleanup_temp_subset_dir()
+        if not frame_indices:
+            raise RuntimeError("선택한 트래킹 범위에 프레임이 없습니다.")
+
         kind = self.media_input.get("kind")
         value = self.media_input.get("value")
-        max_frame_idx = end_frame if end_frame is not None and end_frame >= 0 else None
         if kind != "frame_dir":
             raise ValueError("지원하지 않는 media_input 형식입니다. frame_dir만 지원합니다.")
 
@@ -81,15 +84,14 @@ class TrackingWorker(QObject):
         if not frame_files:
             raise RuntimeError("프레임 디렉터리에 이미지가 없습니다.")
 
-        if max_frame_idx is not None and len(frame_files) <= max_frame_idx:
+        invalid_indices = [idx for idx in frame_indices if idx < 0 or idx >= len(frame_files)]
+        if invalid_indices:
             raise RuntimeError(
-                f"요청한 종료 프레임({max_frame_idx})까지 프레임이 없습니다. "
+                f"요청한 프레임({invalid_indices[0]})이 없습니다. "
                 f"실제 마지막 프레임 인덱스는 {len(frame_files) - 1}입니다."
             )
 
-        selected = frame_files[start_frame:end_frame + 1]
-        if not selected:
-            raise RuntimeError("선택한 트래킹 범위에 프레임이 없습니다.")
+        selected = [frame_files[idx] for idx in frame_indices]
 
         subset_dir = Path(tempfile.mkdtemp(prefix="tracking_subset_frames_"))
         self._temp_subset_dir = subset_dir
@@ -108,7 +110,8 @@ class TrackingWorker(QObject):
             shutil.copy2(str(src), str(dst))
 
         subset_end = len(selected) - 1
-        return str(subset_dir), subset_end
+        return str(subset_dir), subset_end, list(frame_indices)
+    # 여기까지 수정했다: 정방향/역방향 frame index 목록을 그대로 임시 트랙킹 입력으로 준비하게 했다.
 
     def _tracking_result_to_mask(self, result, mask_shape):
         """트랙킹 결과 도형을 다음 청크의 초기 마스크로 변환한다."""
@@ -167,19 +170,29 @@ class TrackingWorker(QObject):
                 self.finished.emit({"saved_count": 0, "stopped": True})
                 return
 
-            total_steps = max(1, self.end_frame - self.start_frame)
+            # 여기서부터 수정하고: 시작/종료 프레임 관계로 트랙킹 방향을 계산한다.
+            direction = 1 if self.end_frame >= self.start_frame else -1
+            total_steps = max(1, abs(self.end_frame - self.start_frame))
             mask_shape = tuple(self.mask.shape[:2])
             current_seed_mask = self.mask.copy()
             chunk_start = int(self.start_frame)
+            # 여기까지 수정했다: 시작/종료 프레임 관계로 트랙킹 방향을 계산한다.
 
-            while chunk_start < self.end_frame:
+            # 여기서부터 수정하고: 역순 트랙킹도 같은 청크 루프로 처리한다.
+            while chunk_start != self.end_frame:
                 if self._stop_requested:
                     stopped = True
                     break
 
-                chunk_end = min(chunk_start + self.chunk_size, self.end_frame)
+                if direction > 0:
+                    chunk_end = min(chunk_start + self.chunk_size, self.end_frame)
+                    frame_indices = list(range(chunk_start, chunk_end + 1))
+                else:
+                    chunk_end = max(chunk_start - self.chunk_size, self.end_frame)
+                    frame_indices = list(range(chunk_start, chunk_end - 1, -1))
+
                 self.engine = SAM2TrackingEngine(model_type=self.model_type, device=self.device)
-                loaded_input, subset_end_frame = self._load_frames_from_media_input(chunk_start, chunk_end)
+                loaded_input, subset_end_frame, original_frame_indices = self._load_frames_from_media_input(frame_indices)
                 self.engine.initialize_tracking(
                     loaded_input,
                     current_seed_mask,
@@ -189,16 +202,15 @@ class TrackingWorker(QObject):
 
                 last_nonempty_result = None
                 last_nonempty_frame_idx = chunk_start
-                max_progress_frame_idx = chunk_start
                 for relative_idx in range(1, subset_end_frame + 1):
                     if self._stop_requested:
                         stopped = True
                         break
 
-                    frame_idx = chunk_start + relative_idx
-                    max_progress_frame_idx = max(max_progress_frame_idx, frame_idx)
-                    percent = int(((max_progress_frame_idx - self.start_frame) / total_steps) * 100)
-                    self.progress.emit(percent, max_progress_frame_idx, self.end_frame)
+                    frame_idx = original_frame_indices[relative_idx]
+                    progress_steps = abs(frame_idx - self.start_frame)
+                    percent = int((progress_steps / total_steps) * 100)
+                    self.progress.emit(percent, frame_idx, self.end_frame)
 
                     result = self.engine.track_frame(relative_idx)
                     if result is None:
@@ -216,7 +228,7 @@ class TrackingWorker(QObject):
 
                 self._release_engine_resources()
 
-                if stopped or chunk_end >= self.end_frame:
+                if stopped or chunk_end == self.end_frame:
                     break
 
                 if last_nonempty_result is None:
@@ -230,18 +242,29 @@ class TrackingWorker(QObject):
                         f"프레임 {last_nonempty_frame_idx}의 마지막 유효 결과를 다음 청크 시드로 만들 수 없습니다."
                     )
 
-                if last_nonempty_frame_idx < chunk_end:
+                missed_chunk_tail = (
+                    last_nonempty_frame_idx < chunk_end
+                    if direction > 0
+                    else last_nonempty_frame_idx > chunk_end
+                )
+                if missed_chunk_tail:
                     print(
-                        f"! 프레임 {last_nonempty_frame_idx + 1}~{chunk_end} 결과가 비어 있어 "
+                        f"! 프레임 {last_nonempty_frame_idx + direction}~{chunk_end} 결과가 비어 있어 "
                         f"마지막 유효 프레임 {last_nonempty_frame_idx}부터 다시 이어서 트래킹합니다."
                     )
 
-                if last_nonempty_frame_idx <= chunk_start:
+                no_progress = (
+                    last_nonempty_frame_idx <= chunk_start
+                    if direction > 0
+                    else last_nonempty_frame_idx >= chunk_start
+                )
+                if no_progress:
                     raise RuntimeError(
                         f"프레임 {chunk_start} 이후 유효한 결과가 없어 더 진행할 수 없습니다."
                     )
 
                 chunk_start = last_nonempty_frame_idx
+            # 여기까지 수정했다: 역순 트랙킹도 같은 청크 루프로 처리한다.
 
             self.finished.emit({"saved_count": saved_count, "stopped": stopped})
         except Exception as e:
@@ -391,6 +414,9 @@ class AITrackingControllerMixin:
 
             self.tracking_start_frame = self.current_index
             self.tracking_end_frame = end_frame
+            # 여기서부터 수정하고: live follow와 완료 판정을 위해 트랙킹 방향을 저장한다.
+            self.tracking_direction = 1 if self.tracking_end_frame >= self.tracking_start_frame else -1
+            # 여기까지 수정했다: live follow와 완료 판정을 위해 트랙킹 방향을 저장한다.
             self.tracking_seed_track_id = seed_ann.track_id
             self.tracking_seed_label_id = seed_ann.label_id
 
@@ -480,14 +506,23 @@ class AITrackingControllerMixin:
                 hidden=False,
             )
 
+        # 여기서부터 수정하고: 역순 트랙킹에서도 live follow가 정상 동작하도록 거리와 종료 판정을 방향 독립적으로 계산한다.
+        tracking_direction = getattr(self, "tracking_direction", 1)
+        frame_distance = abs(frame_idx - self.tracking_start_frame)
+        reached_end_frame = (
+            frame_idx >= self.tracking_end_frame
+            if tracking_direction > 0
+            else frame_idx <= self.tracking_end_frame
+        )
         should_follow_live = (
             self.follow_tracking_frames_live
             and max(1, int(self.tracking_live_follow_stride)) > 0
             and (
-                ((frame_idx - self.tracking_start_frame) % max(1, int(self.tracking_live_follow_stride)) == 0)
-                or frame_idx >= self.tracking_end_frame
+                (frame_distance % max(1, int(self.tracking_live_follow_stride)) == 0)
+                or reached_end_frame
             )
         )
+        # 여기까지 수정했다: 역순 트랙킹에서도 live follow가 정상 동작하도록 거리와 종료 판정을 방향 독립적으로 계산한다.
 
         if should_follow_live:
             self.current_index = clamp(frame_idx, 0, self.source.frame_count() - 1)

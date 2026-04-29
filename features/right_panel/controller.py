@@ -7,11 +7,14 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidgetItem,
     QMenu,
     QMessageBox,
@@ -101,35 +104,65 @@ class RightPanelControllerMixin:
         ai_layout = QVBoxLayout(self.ai_tools_tab)
         ai_layout.addWidget(QLabel("AI Tools"))
 
-        ai_layout.addWidget(QLabel("Interactor"))
+        # 여기서부터 수정하고: Interact 영역을 별도 그룹으로 묶고 bbox/pointer/text prompt UI를 추가했다.
+        interact_group = QGroupBox("Interact")
+        interact_layout = QVBoxLayout(interact_group)
+
+        interact_layout.addWidget(QLabel("Interactor"))
         self.ai_interactor_combo = QComboBox()
         self.ai_interactor_combo.addItem("Segment Anything 2.0", "sam2")
         self.ai_interactor_combo.addItem("Segment Anything 3.0", "sam3")
-        ai_layout.addWidget(self.ai_interactor_combo)
+        interact_layout.addWidget(self.ai_interactor_combo)
 
-        ai_layout.addWidget(QLabel("작업 라벨"))
+        interact_layout.addWidget(QLabel("작업 라벨"))
         label_select_layout = QHBoxLayout()
         self.ai_label_selector = QComboBox()
         label_select_layout.addWidget(self.ai_label_selector)
         self.ai_create_label_button = QPushButton("새 라벨")
         label_select_layout.addWidget(self.ai_create_label_button)
-        ai_layout.addLayout(label_select_layout)
+        interact_layout.addLayout(label_select_layout)
 
-        self.ai_start_with_bbox_checkbox = QCheckBox("Start with a bounding box")
-        self.ai_start_with_bbox_checkbox.setChecked(True)
-        ai_layout.addWidget(self.ai_start_with_bbox_checkbox)
+        interact_layout.addWidget(QLabel("Prompt input"))
+        prompt_input_layout = QHBoxLayout()
+        self.ai_prompt_mode_button_group = QButtonGroup(self)
+        self.ai_prompt_mode_button_group.setExclusive(True)
+        self.ai_bbox_prompt_checkbox = QCheckBox("bbox")
+        self.ai_pointer_prompt_checkbox = QCheckBox("pointer")
+        self.ai_bbox_prompt_checkbox.setChecked(True)
+        self.ai_prompt_mode_button_group.addButton(self.ai_bbox_prompt_checkbox)
+        self.ai_prompt_mode_button_group.addButton(self.ai_pointer_prompt_checkbox)
+        prompt_input_layout.addWidget(self.ai_bbox_prompt_checkbox)
+        prompt_input_layout.addWidget(self.ai_pointer_prompt_checkbox)
+        prompt_input_layout.addStretch()
+        interact_layout.addLayout(prompt_input_layout)
+
+        self.ai_text_prompt_container = QWidget()
+        text_prompt_layout = QVBoxLayout(self.ai_text_prompt_container)
+        text_prompt_layout.setContentsMargins(0, 0, 0, 0)
+        text_prompt_layout.addWidget(QLabel("Text prompt"))
+        self.ai_text_prompt_input = QLineEdit()
+        self.ai_text_prompt_input.setPlaceholderText("SAM3 prompt")
+        text_prompt_layout.addWidget(self.ai_text_prompt_input)
+        self.ai_text_prompt_container.setVisible(False)
+        interact_layout.addWidget(self.ai_text_prompt_container)
 
         self.ai_interact_button = QPushButton("Interact")
         self.ai_interact_button.clicked.connect(self.on_ai_interact_clicked)
         self.ai_label_selector.currentIndexChanged.connect(self.on_ai_label_selector_changed)
         self.ai_create_label_button.clicked.connect(self.on_ai_create_label_clicked)
-        ai_layout.addWidget(self.ai_interact_button)
+        self.ai_interactor_combo.currentIndexChanged.connect(self.on_ai_interactor_changed)
+        interact_layout.addWidget(self.ai_interact_button)
 
         ai_help = QLabel("Interact 클릭 후 메인 화면에서 박스를 그리거나 점을 찍으면 자동 분할됩니다.")
         ai_help.setWordWrap(True)
-        ai_layout.addWidget(ai_help)
+        interact_layout.addWidget(ai_help)
+        ai_layout.addWidget(interact_group)
+        self.on_ai_interactor_changed(self.ai_interactor_combo.currentIndex())
+        # 여기까지 수정했다: Interact 영역을 별도 그룹으로 묶고 bbox/pointer/text prompt UI를 추가했다.
 
-        ai_layout.addWidget(QLabel("Tracking"))
+        # 여기서부터 수정하고: Tracking 영역을 Interact와 시각적으로 분리했다.
+        tracking_group = QGroupBox("Tracking")
+        tracking_layout = QVBoxLayout(tracking_group)
 
         tracking_button_layout = QHBoxLayout()
         self.tracking_start_btn = QPushButton("▶ Start Tracking")
@@ -141,28 +174,46 @@ class RightPanelControllerMixin:
         self.tracking_stop_btn.clicked.connect(self.on_stop_tracking)
         self.tracking_stop_btn.setEnabled(False)
         tracking_button_layout.addWidget(self.tracking_stop_btn)
-        ai_layout.addLayout(tracking_button_layout)
+        tracking_layout.addLayout(tracking_button_layout)
         self.ai_tracking_stop_btn = self.tracking_stop_btn
 
         self.ai_tracking_status_label = QLabel("상태: 준비 중")
-        ai_layout.addWidget(self.ai_tracking_status_label)
+        tracking_layout.addWidget(self.ai_tracking_status_label)
 
         self.ai_tracking_progress_label = QLabel("Tracking 0% (0/0)")
-        ai_layout.addWidget(self.ai_tracking_progress_label)
+        tracking_layout.addWidget(self.ai_tracking_progress_label)
 
         self.ai_tracking_progress_bar = QProgressBar()
         self.ai_tracking_progress_bar.setRange(0, 100)
         self.ai_tracking_progress_bar.setValue(0)
         self.ai_tracking_progress_bar.setFormat("Tracking %p%")
         self.ai_tracking_progress_bar.setTextVisible(True)
-        ai_layout.addWidget(self.ai_tracking_progress_bar)
+        tracking_layout.addWidget(self.ai_tracking_progress_bar)
+        ai_layout.addWidget(tracking_group)
+        # 여기까지 수정했다: Tracking 영역을 Interact와 시각적으로 분리했다.
 
         ai_layout.addStretch()
+
+        # 여기서부터 수정하고: 연속 복붙 기능을 AI Tools 내부가 아닌 오른쪽 패널의 별도 탭으로 옮겼다.
+        self.copy_sequence_tab = QWidget()
+        copy_sequence_layout = QVBoxLayout(self.copy_sequence_tab)
+        copy_sequence_layout.addWidget(QLabel("Copy Sequence"))
+        self.copy_sequence_button = QPushButton("Paste Range")
+        self.copy_sequence_button.clicked.connect(self.on_copy_sequence_clicked)
+        copy_sequence_layout.addWidget(self.copy_sequence_button)
+        copy_sequence_help = QLabel("Ctrl+C로 복사한 객체를 종료 프레임까지 같은 위치와 라벨로 연속 붙여넣습니다.")
+        copy_sequence_help.setWordWrap(True)
+        copy_sequence_layout.addWidget(copy_sequence_help)
+        copy_sequence_layout.addStretch()
+        # 여기까지 수정했다: 연속 복붙 기능을 AI Tools 내부가 아닌 오른쪽 패널의 별도 탭으로 옮겼다.
 
         self.right_tabs.addTab(self.objects_tab, "Objects")
         self.right_tabs.addTab(self.labels_tab, "Labels")
         self.right_tabs.addTab(self.timeline_tab, "Timeline")
         self.right_tabs.addTab(self.ai_tools_tab, "AI Tools")
+        # 여기서부터 수정하고: Copy 탭을 오른쪽 패널 탭 목록에 추가했다.
+        self.right_tabs.addTab(self.copy_sequence_tab, "Copy")
+        # 여기까지 수정했다: Copy 탭을 오른쪽 패널 탭 목록에 추가했다.
         return self.right_tabs
 
     # ---------- 신호 처리 ----------
@@ -170,6 +221,15 @@ class RightPanelControllerMixin:
     def on_right_tab_changed(self, index):
         """오른쪽 탭 변경 후 작업 화면 맞춤 상태를 갱신한다."""
         self.canvas.refresh_fit()
+
+    # 여기서부터 수정하고: SAM3 선택 여부에 따라 text prompt 입력창 표시를 갱신한다.
+    def on_ai_interactor_changed(self, index):
+        """SAM3 interactor를 선택했을 때 text prompt 입력창을 보여준다."""
+        if self.ai_interactor_combo is None or self.ai_text_prompt_container is None:
+            return
+        model_type = str(self.ai_interactor_combo.currentData() or "sam2")
+        self.ai_text_prompt_container.setVisible(model_type == "sam3")
+    # 여기까지 수정했다: SAM3 선택 여부에 따라 text prompt 입력창 표시를 갱신한다.
 
     def next_default_class_index(self):
         """아직 쓰이지 않은 가장 작은 클래스 번호를 반환한다."""

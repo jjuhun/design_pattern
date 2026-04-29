@@ -1,10 +1,11 @@
 # 맨 위 도구 모음과 공통 작업 버튼들을 관리하는 파일입니다.
-# 열기, 내보내기, 되돌리기, 다시 실행, 복사/붙여넣기 흐름을 담당합니다.
+# 열기, 가져오기, 내보내기, 자동 저장, 되돌리기, 다시 실행, 복사/붙여넣기 흐름을 담당합니다.
+import shutil
 from copy import deepcopy
 from pathlib import Path
 from typing import List
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import QApplication, QFileDialog, QLabel, QMessageBox, QPushButton, QProgressBar, QToolBar
 
 from core.annotation.models import Annotation, ClipboardAnnotation
@@ -25,6 +26,10 @@ class TopPanelControllerMixin:
         open_video_btn = QPushButton("Open Video")
         open_video_btn.clicked.connect(self.open_video_file)
         toolbar.addWidget(open_video_btn)
+
+        import_btn = QPushButton("Import")
+        import_btn.clicked.connect(self.on_import_clicked)
+        toolbar.addWidget(import_btn)
 
         export_btn = QPushButton("Export")
         export_btn.clicked.connect(self.on_save_clicked)
@@ -79,122 +84,387 @@ class TopPanelControllerMixin:
             return [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
         return []
 
-    def _build_yolo_classes_lines(self):
-        """classes.txt에 들어갈 클래스 이름 목록을 클래스 번호 순서로 만든다."""
-        class_name_by_idx = {}
-        for label in self.labels_by_id.values():
-            idx = int(label.class_index)
-            if idx < 0:
-                continue
-            name = str(label.class_name or "").strip()
-            class_name_by_idx[idx] = name if name else f"class_{idx}"
+    def _current_media_export_name(self) -> str:
+        """현재 열린 미디어 이름을 export/autosave 폴더명으로 사용할 수 있게 만든다."""
+        base_name = "export"
 
-        if not class_name_by_idx:
-            return []
+        if self.source is not None:
+            try:
+                # ImageFolderSource / CachedFrameSource 기준
+                display_name = self.source.display_name()
+                if display_name:
+                    base_name = Path(display_name).stem
+            except Exception:
+                pass
 
-        max_idx = max(class_name_by_idx.keys())
-        lines = []
-        for idx in range(max_idx + 1):
-            lines.append(class_name_by_idx.get(idx, f"unused_{idx}"))
-        return lines
+        # 파일/폴더명으로 부적절한 문자 정리
+        safe_name = "".join(
+            ch if (ch.isalnum() or ch in ("-", "_")) else "_"
+            for ch in base_name
+        ).strip("_")
 
-    def on_save_clicked(self):
-        """현재 객체 표시 정보를 YOLO 세그먼트 형식으로 내보낸다."""
+        return safe_name or "export"
+
+
+    def _make_unique_result_dir(self, parent_dir: Path) -> Path:
+        """현재 열린 미디어 이름 기반으로 저장 폴더를 만든다."""
+        base_name = self._current_media_export_name()
+
+        base = parent_dir / base_name
+        if not base.exists():
+            base.mkdir(parents=True, exist_ok=False)
+            return base
+
+        idx = 1
+        while True:
+            candidate = parent_dir / f"{base_name}_{idx}"
+            if not candidate.exists():
+                candidate.mkdir(parents=True, exist_ok=False)
+                return candidate
+            idx += 1
+
+    def _build_data_yaml_lines(self):
+        """data.yaml에 저장할 클래스 이름 정보를 만든다."""
+        labels_sorted = sorted(
+            self.labels_by_id.values(),
+            key=lambda label: int(label.class_index),
+        )
+        yaml_lines = ["names:"]
+        for label in labels_sorted: 
+            name = str(label.class_name or "").strip() or f"class_{int(label.class_index)}"
+            yaml_lines.append(f"  {int(label.class_index)}: {name}")
+        yaml_lines.append("path: .")
+        yaml_lines.append("train: train.txt")
+        return yaml_lines
+
+    def _export_yolo_dataset_to_dir(self, output_root: Path, overwrite: bool = False):
+        """지정 폴더에 YOLO Segment 구조로 저장한다."""
         if self.source is None or self.current_index < 0:
-            QMessageBox.warning(self, "경고", "먼저 프레임 소스를 열어주세요.")
-            return
-
-        export_dir = QFileDialog.getExistingDirectory(self, "YOLO Segment 저장 폴더 선택", "")
-        if not export_dir:
-            return
+            raise RuntimeError("먼저 프레임 소스를 열어주세요.")
 
         total = int(self.source.frame_count())
         if total <= 0:
-            QMessageBox.warning(self, "경고", "내보낼 프레임이 없습니다.")
-            return
+            raise RuntimeError("내보낼 프레임이 없습니다.")
 
-        output_root = Path(export_dir)
+        if overwrite and output_root.exists():
+            shutil.rmtree(output_root, ignore_errors=True)
+
         output_root.mkdir(parents=True, exist_ok=True)
+        labels_train_dir = output_root / "labels" / "train"
+        labels_train_dir.mkdir(parents=True, exist_ok=True)
+
+        data_yaml_path = output_root / "data.yaml"
+        train_txt_path = output_root / "train.txt"
 
         exported_files = 0
         exported_segments = 0
         skipped_unlabeled = 0
         skipped_invalid = 0
-        used_txt_names = set()
-        classes_txt_path = output_root / "classes.txt"
-        class_lines = self._build_yolo_classes_lines()
+        train_lines = []
+
+        for frame_idx in range(total):
+            frame_name = str(self.source.frame_name(frame_idx) or f"frame_{frame_idx:06d}.png")
+            stem = Path(frame_name).stem or f"frame_{frame_idx:06d}"
+            image_suffix = Path(frame_name).suffix or ".png"
+
+            train_lines.append(f"./train/{stem}{image_suffix}")
+            label_txt_path = labels_train_dir / f"{stem}.txt"
+
+            pixmap = self.source.get_pixmap(frame_idx)
+            width = int(pixmap.width())
+            height = int(pixmap.height())
+
+            lines = []
+            if width > 0 and height > 0:
+                anns = self.store.get_annotations(frame_idx, include_hidden=False)
+                for ann in anns:
+                    if ann.label_id is None:
+                        skipped_unlabeled += 1
+                        continue
+
+                    label = self.labels_by_id.get(ann.label_id)
+                    if label is None:
+                        skipped_unlabeled += 1
+                        continue
+
+                    points = self._annotation_points_for_yolo_segment(ann)
+                    if len(points) < 3:
+                        skipped_invalid += 1
+                        continue
+
+                    normalized_xy = []
+                    for x, y in points:
+                        nx = clamp(float(x) / float(width), 0.0, 1.0)
+                        ny = clamp(float(y) / float(height), 0.0, 1.0)
+                        normalized_xy.append(f"{nx:.6f}")
+                        normalized_xy.append(f"{ny:.6f}")
+
+                    if not normalized_xy:
+                        skipped_invalid += 1
+                        continue
+
+                    lines.append(f"{int(label.class_index)} {' '.join(normalized_xy)}")
+                    exported_segments += 1
+
+            label_txt_path.write_text("\n".join(lines), encoding="utf-8")
+            exported_files += 1
+
+        train_txt_path.write_text("\n".join(train_lines), encoding="utf-8")
+        data_yaml_path.write_text("\n".join(self._build_data_yaml_lines()), encoding="utf-8")
+
+        return {
+            "output_root": output_root,
+            "exported_files": exported_files,
+            "exported_segments": exported_segments,
+            "skipped_unlabeled": skipped_unlabeled,
+            "skipped_invalid": skipped_invalid,
+        }
+
+    def on_save_clicked(self):
+        """수동 Export: 선택 폴더 아래 result, result_1, result_2 ... 형태로 새 저장 폴더를 만든다."""
+        if self.source is None or self.current_index < 0:
+            QMessageBox.warning(self, "경고", "먼저 프레임 소스를 열어주세요.")
+            return
+
+        selected_dir = QFileDialog.getExistingDirectory(self, "Export 저장 위치 선택", "")
+        if not selected_dir:
+            return
+
+        output_parent = Path(selected_dir)
+        output_root = self._make_unique_result_dir(output_parent)
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            for frame_idx in range(total):
-                frame_name = str(self.source.frame_name(frame_idx) or "")
-                stem = Path(frame_name).stem or f"frame_{frame_idx:06d}"
-                txt_name = f"{stem}.txt"
-                if txt_name in used_txt_names:
-                    txt_name = f"{stem}_{frame_idx:06d}.txt"
-                used_txt_names.add(txt_name)
-                txt_path = output_root / txt_name
-
-                pixmap = self.source.get_pixmap(frame_idx)
-                width = int(pixmap.width())
-                height = int(pixmap.height())
-                lines = []
-
-                if width > 0 and height > 0:
-                    anns = self.store.get_annotations(frame_idx, include_hidden=False)
-                    for ann in anns:
-                        if ann.label_id is None:
-                            skipped_unlabeled += 1
-                            continue
-                        label = self.labels_by_id.get(ann.label_id)
-                        if label is None:
-                            skipped_unlabeled += 1
-                            continue
-
-                        points = self._annotation_points_for_yolo_segment(ann)
-                        if len(points) < 3:
-                            skipped_invalid += 1
-                            continue
-
-                        normalized_xy = []
-                        for x, y in points:
-                            nx = clamp(float(x) / float(width), 0.0, 1.0)
-                            ny = clamp(float(y) / float(height), 0.0, 1.0)
-                            normalized_xy.append(f"{nx:.6f}")
-                            normalized_xy.append(f"{ny:.6f}")
-
-                        if not normalized_xy:
-                            skipped_invalid += 1
-                            continue
-
-                        lines.append(f"{int(label.class_index)} {' '.join(normalized_xy)}")
-                        exported_segments += 1
-
-                txt_path.write_text("\n".join(lines), encoding="utf-8")
-                exported_files += 1
-
-            classes_txt_path.write_text("\n".join(class_lines), encoding="utf-8")
+            result = self._export_yolo_dataset_to_dir(output_root, overwrite=False)
         except Exception as ex:
-            QMessageBox.critical(self, "오류", f"YOLO Segment export 중 오류가 발생했습니다:\n{str(ex)}")
+            QMessageBox.critical(self, "오류", f"YOLO Dataset export 중 오류가 발생했습니다:\n{str(ex)}")
             return
         finally:
             QApplication.restoreOverrideCursor()
 
         self.show_status_message(
-            f"YOLO Segment export 완료: {exported_files}개 txt, {exported_segments}개 세그먼트"
+            f"Export 완료: {output_root.name}, {result['exported_files']}개 txt, {result['exported_segments']}개 세그먼트"
         )
         QMessageBox.information(
             self,
             "Export 완료",
             (
-                f"저장 폴더: {output_root}\n"
-                f"TXT 파일 수: {exported_files}\n"
-                f"세그먼트 수: {exported_segments}\n"
-                f"classes.txt 항목 수: {len(class_lines)}\n"
-                f"스킵(라벨 없음): {skipped_unlabeled}\n"
-                f"스킵(유효하지 않은 도형): {skipped_invalid}"
+                f"저장 폴더: {result['output_root']}\n"
+                f"Label TXT 파일 수: {result['exported_files']}\n"
+                f"세그먼트 수: {result['exported_segments']}\n"
+                f"data.yaml 생성 완료\n"
+                f"train.txt 생성 완료\n"
+                f"스킵(라벨 없음): {result['skipped_unlabeled']}\n"
+                f"스킵(유효하지 않은 도형): {result['skipped_invalid']}"
             ),
         )
+
+    def auto_save(self, n=10):
+        """n분마다 autosave_result 폴더에 자동 저장한다. 같은 폴더에 계속 덮어쓴다."""
+        if not hasattr(self, "auto_save_timer") or self.auto_save_timer is None:
+            self.auto_save_timer = QTimer(self)
+            self.auto_save_timer.timeout.connect(self.run_auto_save)
+
+        minutes = max(1, int(n))
+        self.auto_save_timer.start(minutes * 60 * 1000)
+        self.show_status_message(f"Auto Save 시작: {minutes}분마다 저장")
+
+    def stop_auto_save(self):
+        """자동 저장을 중지한다."""
+        if hasattr(self, "auto_save_timer") and self.auto_save_timer is not None:
+            self.auto_save_timer.stop()
+            self.show_status_message("Auto Save 중지")
+
+    def run_auto_save(self):
+        """자동 저장 타이머가 호출하는 실제 저장 함수."""
+        if self.source is None or self.current_index < 0:
+            return
+
+        try:
+            base_name = self._current_media_export_name()
+            output_root = Path.cwd() / f"{base_name}_autosave"
+
+            # 자동저장은 같은 폴더에 계속 덮어쓰기
+            self._export_yolo_dataset_to_dir(output_root, overwrite=True)
+            self.show_status_message(f"Auto Save 완료: {output_root}")
+        except Exception as ex:
+            self.show_status_message(f"Auto Save 실패: {str(ex)}")
+
+    def on_import_clicked(self):
+        """YOLO Segment export 결과 폴더를 불러와 현재 열린 프레임에 annotation을 복원한다."""
+        if self.source is None or self.current_index < 0:
+            QMessageBox.warning(self, "경고", "먼저 Open Frames 또는 Open Video로 원본 프레임을 열어주세요.")
+            return
+
+        import_dir = QFileDialog.getExistingDirectory(self, "Import result 폴더 선택", "")
+        if not import_dir:
+            return
+
+        result_dir = Path(import_dir)
+        data_yaml_path = result_dir / "data.yaml"
+        labels_train_dir = result_dir / "labels" / "train"
+        train_txt_path = result_dir / "train.txt"
+
+        if not data_yaml_path.exists():
+            QMessageBox.warning(self, "경고", "data.yaml 파일을 찾을 수 없습니다.")
+            return
+        if not labels_train_dir.exists() or not labels_train_dir.is_dir():
+            QMessageBox.warning(self, "경고", "labels/train 폴더를 찾을 수 없습니다.")
+            return
+        if not train_txt_path.exists():
+            QMessageBox.warning(self, "경고", "train.txt 파일을 찾을 수 없습니다.")
+            return
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            imported_info = self._import_yolo_dataset_from_dir(result_dir)
+        except Exception as ex:
+            QMessageBox.critical(self, "오류", f"Import 중 오류가 발생했습니다:\n{str(ex)}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self.show_status_message(
+            f"Import 완료: 라벨 {imported_info['label_count']}개, 객체 {imported_info['annotation_count']}개"
+        )
+        QMessageBox.information(
+            self,
+            "Import 완료",
+            (
+                f"불러온 폴더: {result_dir}\n"
+                f"라벨 수: {imported_info['label_count']}\n"
+                f"객체 수: {imported_info['annotation_count']}\n"
+                f"매칭된 label txt: {imported_info['matched_label_files']}개\n"
+                f"스킵된 줄: {imported_info['skipped_lines']}개"
+            ),
+        )
+
+    def _parse_data_yaml_names(self, data_yaml_path: Path):
+        """data.yaml에서 names 항목을 읽어 {class_index: class_name} 딕셔너리로 반환한다."""
+        names = {}
+        in_names = False
+
+        for raw_line in data_yaml_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.rstrip()
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+
+            if stripped == "names:" or stripped.startswith("names:"):
+                in_names = True
+                inline = stripped[len("names:"):].strip()
+                if inline.startswith("[") and inline.endswith("]"):
+                    items = [v.strip().strip("'\"") for v in inline[1:-1].split(",") if v.strip()]
+                    for idx, name in enumerate(items):
+                        names[idx] = name
+                continue
+
+            if in_names:
+                if not raw_line.startswith((" ", "\t")) and ":" in stripped:
+                    break
+                if ":" not in stripped:
+                    continue
+                key, value = stripped.split(":", 1)
+                key = key.strip()
+                value = value.strip().strip("'\"")
+                if key.isdigit() and value:
+                    names[int(key)] = value
+
+        if not names:
+            raise RuntimeError("data.yaml에서 names 정보를 읽지 못했습니다.")
+        return names
+
+    def _import_yolo_dataset_from_dir(self, result_dir: Path):
+        """result 폴더의 data.yaml과 labels/train/*.txt를 읽어 annotation을 복원한다."""
+        if self.source is None:
+            raise RuntimeError("미디어 소스가 없습니다.")
+
+        data_yaml_path = result_dir / "data.yaml"
+        labels_train_dir = result_dir / "labels" / "train"
+        names_by_class_idx = self._parse_data_yaml_names(data_yaml_path)
+
+        self.push_undo_state("YOLO Dataset Import")
+
+        self.store.clear()
+        self.labels_by_id.clear()
+        self.label_order.clear()
+        self.next_label_id = 1
+        self.current_working_label_id = None
+        self.timeline_filter_state = {None: True}
+
+        class_idx_to_label_id = {}
+        for class_idx in sorted(names_by_class_idx.keys()):
+            label = self.create_label(str(names_by_class_idx[class_idx]), int(class_idx))
+            class_idx_to_label_id[int(class_idx)] = label.label_id
+
+        total = int(self.source.frame_count())
+        annotation_count = 0
+        matched_label_files = 0
+        skipped_lines = 0
+
+        for frame_idx in range(total):
+            frame_name = str(self.source.frame_name(frame_idx) or f"frame_{frame_idx:06d}.png")
+            stem = Path(frame_name).stem or f"frame_{frame_idx:06d}"
+            label_txt_path = labels_train_dir / f"{stem}.txt"
+            if not label_txt_path.exists():
+                continue
+
+            matched_label_files += 1
+            pixmap = self.source.get_pixmap(frame_idx)
+            width = int(pixmap.width())
+            height = int(pixmap.height())
+            if width <= 0 or height <= 0:
+                continue
+
+            for raw_line in label_txt_path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) < 7:
+                    skipped_lines += 1
+                    continue
+
+                try:
+                    class_idx = int(float(parts[0]))
+                    coords = [float(v) for v in parts[1:]]
+                except ValueError:
+                    skipped_lines += 1
+                    continue
+
+                if len(coords) < 6 or len(coords) % 2 != 0:
+                    skipped_lines += 1
+                    continue
+
+                label_id = class_idx_to_label_id.get(class_idx)
+                if label_id is None:
+                    skipped_lines += 1
+                    continue
+
+                points = []
+                for i in range(0, len(coords), 2):
+                    x = clamp(coords[i], 0.0, 1.0) * width
+                    y = clamp(coords[i + 1], 0.0, 1.0) * height
+                    points.append((float(x), float(y)))
+
+                if len(points) < 3:
+                    skipped_lines += 1
+                    continue
+
+                self.store.add_polygon(frame_idx, points, label_id)
+                annotation_count += 1
+
+        self.refresh_label_list()
+        self.refresh_timeline_filter_menu()
+        self.refresh_timeline_tree()
+        self.refresh_annotations_for_current_frame([])
+
+        return {
+            "label_count": len(class_idx_to_label_id),
+            "annotation_count": annotation_count,
+            "matched_label_files": matched_label_files,
+            "skipped_lines": skipped_lines,
+        }
 
     def update_undo_button_state(self):
         """되돌리기와 다시 실행 버튼의 활성화 상태를 갱신한다."""

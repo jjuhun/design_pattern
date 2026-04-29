@@ -119,6 +119,18 @@ class AIInteractControllerMixin:
         self.refresh_ai_label_selector()
         self.show_status_message(f"AI 작업 라벨 '{label.class_name}' 생성 및 선택됨")
 
+    # 여기서부터 수정하고: AI Tools의 bbox/pointer 선택 UI에서 초기 prompt mode를 읽는다.
+    def _selected_ai_initial_prompt_mode(self) -> str:
+        """AI Interact 시작 시 사용할 초기 입력 방식을 반환한다."""
+        if getattr(self, "ai_pointer_prompt_checkbox", None) is not None:
+            return "point" if self.ai_pointer_prompt_checkbox.isChecked() else "box"
+
+        start_with_bbox = True
+        if getattr(self, "ai_start_with_bbox_checkbox", None) is not None:
+            start_with_bbox = bool(self.ai_start_with_bbox_checkbox.isChecked())
+        return "box" if start_with_bbox else "point"
+    # 여기까지 수정했다: AI Tools의 bbox/pointer 선택 UI에서 초기 prompt mode를 읽는다.
+
     def on_ai_interact_clicked(self):
         """현재 프레임 단일 SAM 상호작용 입력 대기를 시작하거나 결과를 확정한다."""
         if self.ai_interact_pending and self.ai_pending_mask is not None:
@@ -135,10 +147,11 @@ class AIInteractControllerMixin:
         if self.ai_interactor_combo is not None:
             model_type = str(self.ai_interactor_combo.currentData() or "sam2")
 
-        start_with_bbox = bool(self.ai_start_with_bbox_checkbox.isChecked()) if self.ai_start_with_bbox_checkbox is not None else True
+        # 여기서부터 수정하고: 기존 단일 checkbox 대신 bbox/pointer 선택값으로 시작 방식을 정한다.
+        prompt_mode = self._selected_ai_initial_prompt_mode()
 
         self.ai_interact_pending = True
-        self.ai_prompt_mode = "box" if start_with_bbox else "point"
+        self.ai_prompt_mode = prompt_mode
         self.ai_pending_model_type = model_type
         self.ai_pending_box = None
         self.ai_refinement_points = []
@@ -146,12 +159,13 @@ class AIInteractControllerMixin:
         self.ai_pending_mask = None
         self.ai_pending_polygon = None
 
-        if start_with_bbox:
+        if prompt_mode == "box":
             self.canvas.set_mode("box")
             self.show_status_message("AI Interact 대기: 대상 물체를 박스로 드래그하세요.")
         else:
             self.canvas.set_mode("ai_point")
             self.show_status_message("AI Interact 대기: 대상 물체를 점으로 클릭하세요.")
+        # 여기까지 수정했다: 기존 단일 checkbox 대신 bbox/pointer 선택값으로 시작 방식을 정한다.
         if self.ai_interact_button is not None:
             self.ai_interact_button.setText("Confirm")
 

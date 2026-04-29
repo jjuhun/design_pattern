@@ -85,17 +85,27 @@ class TrackingRangeDialog(QDialog):
         start_label = QLabel(str(start_frame))
         form_layout.addRow("시작 프레임:", start_label)
         
+        # 여기서부터 수정하고: 종료 프레임을 시작 프레임 앞/뒤 모두 선택할 수 있게 했다.
         # 종료 프레임
         self.end_spin = QSpinBox()
-        self.end_spin.setMinimum(start_frame)
+        self.end_spin.setMinimum(0)
         self.end_spin.setMaximum(max_frame - 1)
-        self.end_spin.setValue(min(start_frame + 10, max_frame - 1))
+        default_end_frame = min(start_frame + 10, max_frame - 1)
+        if default_end_frame == start_frame and start_frame > 0:
+            default_end_frame = max(start_frame - 10, 0)
+        self.end_spin.setValue(default_end_frame)
         form_layout.addRow("종료 프레임:", self.end_spin)
+        # 여기까지 수정했다: 종료 프레임을 시작 프레임 앞/뒤 모두 선택할 수 있게 했다.
         
         layout.addLayout(form_layout)
         
         info_label = QLabel(f"총 프레임 수: {max_frame}")
         layout.addWidget(info_label)
+        # 여기서부터 수정하고: 종료 프레임이 작으면 역순 트랙킹이 된다는 안내를 추가했다.
+        direction_info_label = QLabel("종료 프레임이 시작 프레임보다 작으면 역순으로 트랙킹합니다.")
+        direction_info_label.setWordWrap(True)
+        layout.addWidget(direction_info_label)
+        # 여기까지 수정했다: 종료 프레임이 작으면 역순 트랙킹이 된다는 안내를 추가했다.
         
         layout.addStretch()
         

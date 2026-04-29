@@ -21,6 +21,9 @@ from canvas import AnnotationCanvas
 from core.annotation.models import AnnotationStore, ClipboardAnnotation, LabelDef
 from features.ai_interact.controller import AIInteractControllerMixin
 from features.ai_tracking.controller import AITrackingControllerMixin, TrackingWorker
+# 여기서부터 수정하고: 연속 복붙 기능 mixin import를 추가했다.
+from features.copy_sequence.controller import CopySequenceControllerMixin
+# 여기까지 수정했다: 연속 복붙 기능 mixin import를 추가했다.
 from features.frame_panel.controller import FramePanelControllerMixin
 from features.frame_panel.sources import FrameSourceBase
 from features.right_panel.controller import RightPanelControllerMixin
@@ -34,6 +37,9 @@ class MainWindow(
     RightPanelControllerMixin,
     AIInteractControllerMixin,
     AITrackingControllerMixin,
+    # 여기서부터 수정하고: 연속 복붙 기능 mixin을 MainWindow에 연결했다.
+    CopySequenceControllerMixin,
+    # 여기까지 수정했다: 연속 복붙 기능 mixin을 MainWindow에 연결했다.
     ShapeAnnotationControllerMixin,
     QMainWindow,
 ):
@@ -42,7 +48,10 @@ class MainWindow(
         super().__init__()
         self.setWindowTitle("Segment Labeling UI")
         self.resize(1600, 900)
-
+        # auto_save 관련 변수 : 자동 저장 타이머 상태를 추가.
+        self.auto_save_timer = None
+        self.auto_save(n=1)
+        
         self.source: Optional[FrameSourceBase] = None
         self.current_index = -1
         self.current_mode = "select"
@@ -141,17 +150,30 @@ class MainWindow(
         self.labels_tab = None
         self.timeline_tab = None
         self.ai_tools_tab = None
+        # 여기서부터 수정하고: 오른쪽 패널의 Copy Sequence 전용 탭 상태를 추가했다.
+        self.copy_sequence_tab = None
+        # 여기까지 수정했다: 오른쪽 패널의 Copy Sequence 전용 탭 상태를 추가했다.
         self.timeline_filter_button = None
         self.timeline_filter_menu = None
+        # 여기서부터 수정하고: AI Tools 입력 방식과 SAM3 text prompt 위젯 상태를 추가했다.
         self.ai_interactor_combo = None
         self.ai_label_selector = None
         self.ai_create_label_button = None
         self.ai_start_with_bbox_checkbox = None
+        self.ai_prompt_mode_button_group = None
+        self.ai_bbox_prompt_checkbox = None
+        self.ai_pointer_prompt_checkbox = None
+        self.ai_text_prompt_container = None
+        self.ai_text_prompt_input = None
         self.ai_interact_button = None
+        # 여기까지 수정했다: AI Tools 입력 방식과 SAM3 text prompt 위젯 상태를 추가했다.
         self.ai_tracking_status_label = None
         self.ai_tracking_progress_label = None
         self.ai_tracking_progress_bar = None
         self.ai_tracking_stop_btn = None
+        # 여기서부터 수정하고: 오른쪽 패널의 연속 복붙 버튼 상태를 추가했다.
+        self.copy_sequence_button = None
+        # 여기까지 수정했다: 오른쪽 패널의 연속 복붙 버튼 상태를 추가했다.
 
         self.create_top_toolbar()
         self.build_ui()
