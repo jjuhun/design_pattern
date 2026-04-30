@@ -13,6 +13,7 @@ from core.common.utils import clamp
 
 
 class TopPanelControllerMixin:
+    
     def create_top_toolbar(self):
         """맨 위 도구 모음을 만들고 버튼을 기존 동작에 연결한다."""
         toolbar = QToolBar("Top Toolbar")
@@ -282,7 +283,14 @@ class TopPanelControllerMixin:
 
         try:
             base_name = self._current_media_export_name()
-            output_root = Path.cwd() / f"{base_name}_autosave"
+
+            # 🔥 import 경로가 있으면 그 부모 폴더 사용
+            if hasattr(self, "last_import_dir") and self.last_import_dir is not None:
+                parent_dir = self.last_import_dir.parent
+            else:
+                parent_dir = Path.cwd()  # fallback
+
+            output_root = parent_dir / f"{base_name}_autosave"
 
             # 자동저장은 같은 폴더에 계속 덮어쓰기
             self._export_yolo_dataset_to_dir(output_root, overwrite=True)
@@ -301,6 +309,7 @@ class TopPanelControllerMixin:
             return
 
         result_dir = Path(import_dir)
+        self.last_import_dir = result_dir
         data_yaml_path = result_dir / "data.yaml"
         labels_train_dir = result_dir / "labels" / "train"
         train_txt_path = result_dir / "train.txt"

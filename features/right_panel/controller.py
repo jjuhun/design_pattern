@@ -37,7 +37,7 @@ class RightPanelControllerMixin:
     def build_right_panel(self):
         """오른쪽 탭 패널을 만들고 각 탭의 버튼과 목록을 배치한다."""
         self.right_tabs = QTabWidget()        
-        self.right_tabs.setMinimumWidth(300) # 420 -> 300
+        # self.right_tabs.setMinimumWidth(300) # 420 -> 300
         self.right_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.right_tabs.currentChanged.connect(self.on_right_tab_changed)
 
@@ -937,7 +937,7 @@ class RightPanelControllerMixin:
                 self.object_tree.setCurrentItem(None)
         finally:
             self._syncing_object_tree = False
-            
+
     def sync_timeline_tree_selection(self, ann_ids):
         """타임라인 선택 상태를 지정한 객체 표시 정보 ID 목록과 맞춘다."""
         if self._syncing_timeline:

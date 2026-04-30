@@ -52,6 +52,8 @@ class MainWindow(
         self.auto_save_timer = None
         self.auto_save(n=1)
         
+        self.last_import_dir = None
+
         self.source: Optional[FrameSourceBase] = None
         self.current_index = -1
         self.current_mode = "select"

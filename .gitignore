@@ -1,0 +1,25 @@
+# Runtime caches
+.cache/
+__pycache__/
+*.py[cod]
+
+# Local session/tool files
+.codex
+
+# Local environment
+.env
+.env.*
+.venv/
+venv/
+
+# Model checkpoints
+weights/*.pt
+weights/*.pth
+weights/*.ckpt
+weights/*.safetensors
+checkpoints/
+
+# Notebook, logs, and OS files
+.ipynb_checkpoints/
+*.log
+.DS_Store
