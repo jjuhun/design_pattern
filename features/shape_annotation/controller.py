@@ -11,6 +11,7 @@ from PyQt5.QtWidgets import (
     QGraphicsPolygonItem,
     QGraphicsRectItem,
     QGraphicsSimpleTextItem,
+    QSizePolicy,
     QToolButton,
     QVBoxLayout,
 )
@@ -28,7 +29,8 @@ class ShapeAnnotationControllerMixin:
     def build_left_toolbar(self):
         """왼쪽 도구 패널에 박스와 폴리곤 생성 버튼을 만든다."""
         panel = QFrame()
-        panel.setFixedWidth(110)
+        panel.setFixedWidth(90) # 110 -> 90
+        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         panel.setFrameShape(QFrame.StyledPanel)
 
         layout = QVBoxLayout(panel)
@@ -75,7 +77,7 @@ class ShapeAnnotationControllerMixin:
             self.show_status_message("Box 모드: 드래그해서 박스를 생성하세요.")
         elif mode == "polygon":
             self.mode_label.setText("현재 상태: Polygon 생성 모드")
-            self.show_status_message("Polygon 모드: 좌클릭 점 추가, 우클릭 완료, Esc 취소")
+            self.show_status_message("Polygon 모드: 좌클릭 점 추가, 우클릭 점 삭제, Enter 확정, Esc 취소")
         elif mode == "ai_point":
             self.mode_label.setText("현재 상태: AI Point 입력 모드")
             self.show_status_message("AI Point 모드: 대상 물체 위를 좌클릭하세요. (우클릭 취소)")

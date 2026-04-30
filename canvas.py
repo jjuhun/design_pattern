@@ -88,6 +88,11 @@ class AnnotationCanvas(
         self._editing_vertex_original_data: Optional[ShapeData] = None
 
         self._manual_view = False
+        # panning state for right-button drag
+        self._panning = False
+        self._pan_start = None
+        # whether a right-button press may start panning when moved
+        self._pan_possible = False
         self._last_pixmap_size: Optional[Tuple[int, int]] = None
 
         self.show_placeholder("Open Frames 또는 Open Video로 미디어를 선택하세요.")

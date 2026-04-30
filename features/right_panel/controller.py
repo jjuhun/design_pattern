@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QToolButton,
     QTreeWidgetItem,
     QVBoxLayout,
+    QSizePolicy,
     QWidget,
 )
 
@@ -35,8 +36,9 @@ from core.dialogs.dialogs import LabelEditDialog
 class RightPanelControllerMixin:
     def build_right_panel(self):
         """오른쪽 탭 패널을 만들고 각 탭의 버튼과 목록을 배치한다."""
-        self.right_tabs = QTabWidget()
-        self.right_tabs.setFixedWidth(420)
+        self.right_tabs = QTabWidget()        
+        self.right_tabs.setMinimumWidth(300) # 420 -> 300
+        self.right_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.right_tabs.currentChanged.connect(self.on_right_tab_changed)
 
         # 객체 목록 탭
@@ -432,7 +434,7 @@ class RightPanelControllerMixin:
         self._set_label_list_selection([label_id])
         self.refresh_annotations_for_current_frame(
             self.get_selected_annotation_ids(),
-            refresh_timeline=refresh_timeline,
+            refresh_timeline=True,
         )
         self.refresh_timeline_filter_menu()
         self.refresh_timeline_tree()
@@ -663,6 +665,7 @@ class RightPanelControllerMixin:
         self._syncing_timeline = True
         try:
             self.timeline_tree.clear()
+            self._timeline_anchor_pair = None
             for ann in self.store.all_annotations():
                 if not self.is_timeline_label_visible(ann.label_id):
                     continue
@@ -678,11 +681,17 @@ class RightPanelControllerMixin:
             self._syncing_timeline = False
 
     def on_timeline_item_clicked(self, item):
-        """타임라인에서 아이템을 클릭하면 해당 프레임으로 이동한다."""
+        """타임라인 클릭 시 단일 선택은 해당 프레임으로 이동한다."""
         data = item.data(0, Qt.UserRole)
-        if data:
-            frame_idx, ann_id = data
+        if not data or self._syncing_timeline:
+            return
+        selected_pairs = self._timeline_selected_pairs()
+        # 다중 선택 중에는 최초(anchor) 프레임 표시를 유지한다.
+        if len(selected_pairs) <= 1:
+            self._timeline_anchor_pair = data
+            frame_idx, _ann_id = data
             self.go_to_frame_index(frame_idx)
+            self._sync_selection_from_timeline()
 
     def delete_selected_timeline_annotations(self):
         """타임라인에서 선택된 객체 표시 정보를 삭제한다."""
@@ -814,18 +823,16 @@ class RightPanelControllerMixin:
         """작업 화면 선택 변경을 오른쪽 객체/라벨 목록에 반영한다."""
         self.sync_object_tree_selection(ann_ids)
         self.sync_label_list_view(ann_ids)
+        self.sync_timeline_tree_selection(ann_ids)
 
     def on_object_tree_selection_changed(self):
         """객체 목록 선택 변경을 작업 화면과 라벨 목록에 반영한다."""
         if self._syncing_object_tree:
             return
-        ann_ids = []
-        for item in self.object_tree.selectedItems():
-            ann_id = item.data(0, Qt.UserRole)
-            if ann_id is not None and ann_id not in ann_ids:
-                ann_ids.append(int(ann_id))
+        ann_ids = self._selected_object_tree_ann_ids()
         self.canvas.set_selected_annotations(ann_ids)
         self.sync_label_list_view(ann_ids)
+        self.sync_timeline_tree_selection(ann_ids)
 
     def on_object_label_combo_changed(self, ann_id: int, combo: QComboBox, index: int):
         """객체 목록의 라벨 콤보박스 변경을 저장소에 반영한다."""
@@ -894,13 +901,23 @@ class RightPanelControllerMixin:
         canvas_ids = self.canvas.selected_annotation_ids()
         if canvas_ids:
             return list(canvas_ids)
-        ids = []
-        for item in self.object_tree.selectedItems():
-            ann_id = item.data(0, Qt.UserRole)
-            if ann_id is not None and ann_id not in ids:
-                ids.append(int(ann_id))
-        return ids
+        return self._selected_object_tree_ann_ids()
 
+    def _selected_object_tree_ann_ids(self):
+        """객체 트리에서 선택된 ann_id를 행 기준으로 수집한다."""
+        ids = []
+        # Iterate top-level items and check isSelected() to avoid issues
+        # caused by embedded widgets or varying selection columns.
+        for row in range(self.object_tree.topLevelItemCount()):
+            item = self.object_tree.topLevelItem(row)
+            if item is None:
+                continue
+            if item.isSelected():
+                ann_id = item.data(0, Qt.UserRole)
+                if ann_id is not None and ann_id not in ids:
+                    ids.append(int(ann_id))
+        return ids
+    
     def sync_object_tree_selection(self, ann_ids):
         """객체 목록 선택 상태를 지정한 객체 표시 정보 ID 목록과 맞춘다."""
         self._syncing_object_tree = True
@@ -920,6 +937,71 @@ class RightPanelControllerMixin:
                 self.object_tree.setCurrentItem(None)
         finally:
             self._syncing_object_tree = False
+            
+    def sync_timeline_tree_selection(self, ann_ids):
+        """타임라인 선택 상태를 지정한 객체 표시 정보 ID 목록과 맞춘다."""
+        if self._syncing_timeline:
+            return
+        self._syncing_timeline = True
+        try:
+            self.timeline_tree.clearSelection()
+            ann_id_set = set(ann_ids or [])
+            for row in range(self.timeline_tree.topLevelItemCount()):
+                item = self.timeline_tree.topLevelItem(row)
+                data = item.data(0, Qt.UserRole)
+                if data:
+                    frame_idx, timeline_ann_id = data
+                    if timeline_ann_id in ann_id_set:
+                        item.setSelected(True)
+        finally:
+            self._syncing_timeline = False
+
+    def on_timeline_tree_selection_changed(self):
+        """타임라인 선택 변경을 캔버스와 객체 목록에 반영한다."""
+        if self._syncing_timeline:
+            return
+        self._syncing_timeline = True
+        try:
+            self._sync_selection_from_timeline()
+        finally:
+            self._syncing_timeline = False
+
+    def _timeline_selected_pairs(self):
+        """타임라인에서 선택된 (frame_idx, ann_id) 목록을 화면 순서대로 반환한다."""
+        pairs = []
+        for row in range(self.timeline_tree.topLevelItemCount()):
+            item = self.timeline_tree.topLevelItem(row)
+            if not item.isSelected():
+                continue
+            data = item.data(0, Qt.UserRole)
+            if data and data not in pairs:
+                pairs.append(data)
+        return pairs
+
+    def _sync_selection_from_timeline(self):
+        """타임라인 선택을 기준 프레임(anchor) 중심으로 캔버스에 반영한다."""
+        selected_pairs = self._timeline_selected_pairs()
+        if not selected_pairs:
+            self._timeline_anchor_pair = None
+            self.canvas.set_selected_annotations([])
+            return
+
+        anchor_pair = self._timeline_anchor_pair
+        if anchor_pair not in selected_pairs:
+            anchor_pair = selected_pairs[0]
+        self._timeline_anchor_pair = anchor_pair
+
+        anchor_frame, _anchor_ann_id = anchor_pair
+        if self.current_index != anchor_frame:
+            self.go_to_frame_index(anchor_frame)
+
+        ann_ids = []
+        for frame_idx, ann_id in selected_pairs:
+            if frame_idx == anchor_frame and ann_id not in ann_ids:
+                ann_ids.append(int(ann_id))
+
+        # canvas 업데이트 → on_canvas_selection_changed → object_tree 동기화
+        self.canvas.set_selected_annotations(ann_ids)
 
     # ---------- 삭제 ----------
 

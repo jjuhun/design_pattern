@@ -26,23 +26,21 @@ class MouseEventControllerMixin:
         if delta == 0:
             event.accept()
             return
-
-        if event.modifiers() & Qt.ControlModifier:
-            factor = 1.15 if delta > 0 else (1.0 / 1.15)
-            self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
-            self.scale(factor, factor)
+        # Shift + wheel -> horizontal scroll
+        if event.modifiers() & Qt.ShiftModifier:
+            bar = self.horizontalScrollBar()
+            bar.setValue(bar.value() - delta)
             self._manual_view = True
             event.accept()
             return
 
-        if event.modifiers() & Qt.ShiftModifier:
-            bar = self.horizontalScrollBar()
-            bar.setValue(bar.value() - delta)
-        else:
-            bar = self.verticalScrollBar()
-            bar.setValue(bar.value() - delta)
+        # Default: wheel for zoom (wheel up -> zoom in, wheel down -> zoom out)
+        factor = 1.15 if delta > 0 else (1.0 / 1.15)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.scale(factor, factor)
         self._manual_view = True
         event.accept()
+        return
 
     def mouseDoubleClickEvent(self, event):
         """왼쪽 더블클릭 시 이미지를 화면에 다시 맞춘다."""
@@ -259,7 +257,14 @@ class MouseEventControllerMixin:
                 self._update_polygon_preview()
                 event.accept()
                 return
-
+            if event.button() == Qt.RightButton:
+                # Remove the last added vertex when right-clicking during polygon drawing
+                if self._polygon_points:
+                    self._polygon_points.pop()
+                    self._update_polygon_preview()
+                event.accept()
+                return
+            
         if self._mode == "ai_refine":
             if event.button() == Qt.LeftButton:
                 self.aiPromptPointRequested.emit(scene_pos.x(), scene_pos.y(), 1)
@@ -292,6 +297,13 @@ class MouseEventControllerMixin:
                         event.accept()
                         return
 
+            # prepare for possible panning: only start when mouse moves while right button held
+            if event.button() == Qt.RightButton:
+                self._pan_possible = True
+                self._pan_start = event.pos()
+                event.accept()
+                return
+            
             if event.button() == Qt.LeftButton:
                 vertex_key = self._vertex_key_at_scene_pos(scene_pos)
                 ctrl_pressed = bool(event.modifiers() & Qt.ControlModifier)
@@ -348,6 +360,28 @@ class MouseEventControllerMixin:
         """마우스 이동 중 임시 도형, 드래그, 꼭짓점 편집 미리보기를 갱신한다."""
         scene_pos = self._clamp_point_to_image(self.mapToScene(event.pos()))
 
+        # handle right-button press-then-drag panning
+        if event.buttons() & Qt.RightButton and getattr(self, "_pan_possible", False):
+            cur = event.pos()
+            # if not already panning, start when moved beyond a small threshold
+            if not getattr(self, "_panning", False):
+                dx0 = cur.x() - self._pan_start.x()
+                dy0 = cur.y() - self._pan_start.y()
+                if (dx0 * dx0 + dy0 * dy0) >= 9:  # threshold ~3 px
+                    self._panning = True
+                    self.setCursor(Qt.ClosedHandCursor)
+            if getattr(self, "_panning", False):
+                dx = cur.x() - self._pan_start.x()
+                dy = cur.y() - self._pan_start.y()
+                hbar = self.horizontalScrollBar()
+                vbar = self.verticalScrollBar()
+                hbar.setValue(hbar.value() - dx)
+                vbar.setValue(vbar.value() - dy)
+                self._pan_start = cur
+                self._manual_view = True
+                event.accept()
+                return
+            
         if self._mode == "box" and self._box_start_scene is not None:
             self._update_box_preview(scene_pos)
             event.accept()
@@ -401,6 +435,16 @@ class MouseEventControllerMixin:
 
         scene_pos = self._clamp_point_to_image(self.mapToScene(event.pos()))
 
+        if event.button() == Qt.RightButton:
+            if getattr(self, "_panning", False):
+                self._panning = False
+                self.setCursor(Qt.ArrowCursor)
+                self._manual_view = True
+            self._pan_possible = False
+            self._pan_start = None
+            event.accept()
+            return
+
         if self._mode == "box" and self._box_start_scene is not None and event.button() == Qt.LeftButton:
             rect = QRectF(self._box_start_scene, scene_pos).normalized()
             self._clear_temp_box()
@@ -451,4 +495,29 @@ class MouseEventControllerMixin:
             self._dragging_ann_ids = []
             self._drag_start_scene = None
 
+    def keyPressEvent(self, event):
+        """키 입력 처리: Polygon 모드에서 Enter로 폴리곤 확정 처리한다."""
+        # Handle Enter/Return to finalize polygon drawing
+        try:
+            key = event.key()
+        except Exception:
+            key = None
+        if self._mode == "polygon" and key in (Qt.Key_Return, Qt.Key_Enter):
+            if len(self._polygon_points) >= 3:
+                pts = list(self._polygon_points)
+                # clear temporary preview before emitting creation
+                self._clear_polygon_preview()
+                self._polygon_points.clear()
+                self.annotationCreateRequested.emit("polygon", pts)
+                # after creation, leave mode handling to the receiver (usually set to select)
+            else:
+                try:
+                    self.statusMessage.emit("폴리곤은 최소 3개의 점이 필요합니다.")
+                except Exception:
+                    pass
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
+        
     # ---------- 트랙킹 관련 메서드 ----------

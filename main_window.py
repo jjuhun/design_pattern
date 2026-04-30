@@ -64,6 +64,7 @@ class MainWindow(
         self._syncing_object_tree = False
         self._syncing_label_list = False
         self._syncing_timeline = False
+        self._timeline_anchor_pair: Optional[Tuple[int, int]] = None
 
         self.store = AnnotationStore()
         self.labels_by_id: Dict[int, LabelDef] = {}
@@ -212,6 +213,7 @@ class MainWindow(
         """오른쪽 패널 위젯의 선택 변경 신호를 연결한다."""
         self.object_tree.itemSelectionChanged.connect(self.on_object_tree_selection_changed)
         self.label_list.itemSelectionChanged.connect(self.on_label_list_selection_changed)
+        self.timeline_tree.itemSelectionChanged.connect(self.on_timeline_tree_selection_changed)
 
     def show_status_message(self, text):
         """상태 표시줄에 짧은 안내 메시지를 보여준다."""

@@ -30,9 +30,11 @@ class FramePanelControllerMixin:
         splitter.addWidget(left_panel)
         splitter.addWidget(self.canvas)
         splitter.addWidget(right_panel)
+        splitter.setChildrenCollapsible(False)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
+        splitter.setSizes([120, 1160, 420])
         root_layout.addWidget(splitter, 1)
 
         bottom_layout = QHBoxLayout()
@@ -274,7 +276,9 @@ class FramePanelControllerMixin:
         self.forward10_button.setEnabled(idx < total - 1)
         self.last_button.setEnabled(idx < total - 1)
 
-        self.refresh_annotations_for_current_frame(self.get_selected_annotation_ids())
+        # 프레임 이동만으로는 타임라인 목록 자체가 바뀌지 않으므로,
+        # 재생성하지 않아 다중 선택 상태를 유지한다.
+        self.refresh_annotations_for_current_frame(self.get_selected_annotation_ids(), refresh_timeline=False)
 
     def go_to_frame(self, index):
         """슬라이더나 숫자 입력에서 요청한 프레임으로 이동한다."""
