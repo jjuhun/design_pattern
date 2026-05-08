@@ -1,0 +1,25 @@
+name: sam2_qt_env
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+
+  - glib
+  - gstreamer
+  - gst-plugins-base
+
+  - pyqt=5
+
+  - pytorch
+  - torchvision
+  - torchaudio
+
+  - opencv
+  - ffmpeg
+  - pillow
+
+  - numpy
+  - scipy
+  - matplotlib
+
+  - tqdm

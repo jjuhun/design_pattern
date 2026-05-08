@@ -16,6 +16,9 @@ from features.ai_tracking.dialogs import SelectSAMModelDialog, TrackingRangeDial
 
 
 class TrackingWorker(QObject):
+    DEFAULT_CHUNK_SIZE = 8
+    LARGE_CHUNK_SIZE = 4
+
     progress = pyqtSignal(int, int, int)
     resultReady = pyqtSignal(object)
     finished = pyqtSignal(object)
@@ -32,7 +35,8 @@ class TrackingWorker(QObject):
         shape_type,
         label_id,
         track_id,
-        chunk_size: int = 32,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+        polygon_simplification: float = 0.005,
     ):
         """트랙킹을 백그라운드에서 실행할 작업 객체 상태를 초기화한다."""
         super().__init__()
@@ -45,10 +49,16 @@ class TrackingWorker(QObject):
         self.shape_type = shape_type
         self.label_id = label_id
         self.track_id = track_id
-        self.chunk_size = max(8, int(chunk_size))
+        self.chunk_size = max(4, int(chunk_size))
+        self.polygon_simplification = max(0.0, float(polygon_simplification))
         self._stop_requested = False
         self.engine = None
         self._temp_subset_dir: Optional[Path] = None
+
+    @classmethod
+    def chunk_size_for_model(cls, model_type: str) -> int:
+        """메모리 사용량이 큰 모델일수록 더 작은 트랙킹 청크를 사용한다."""
+        return cls.LARGE_CHUNK_SIZE if model_type == "sam2_large" else cls.DEFAULT_CHUNK_SIZE
 
     def stop(self):
         """작업 루프가 안전하게 멈추도록 중지 요청 상태를 켠다."""
@@ -158,6 +168,22 @@ class TrackingWorker(QObject):
             pass
         gc.collect()
 
+    def _reset_chunk_resources(self):
+        """다음 청크를 위해 추론 상태만 정리하고 로드된 모델은 유지한다."""
+        if self.engine is not None:
+            try:
+                self.engine.stop_tracking()
+            except Exception:
+                pass
+        self._cleanup_temp_subset_dir()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        gc.collect()
+
     def run(self):
         """청크 단위로 트랙킹을 수행하고 진행률과 결과를 신호로 보낸다."""
         saved_count = 0
@@ -191,7 +217,12 @@ class TrackingWorker(QObject):
                     chunk_end = max(chunk_start - self.chunk_size, self.end_frame)
                     frame_indices = list(range(chunk_start, chunk_end - 1, -1))
 
-                self.engine = SAM2TrackingEngine(model_type=self.model_type, device=self.device)
+                if self.engine is None:
+                    self.engine = SAM2TrackingEngine(
+                        model_type=self.model_type,
+                        device=self.device,
+                        polygon_simplification=self.polygon_simplification,
+                    )
                 loaded_input, subset_end_frame, original_frame_indices = self._load_frames_from_media_input(frame_indices)
                 self.engine.initialize_tracking(
                     loaded_input,
@@ -226,7 +257,7 @@ class TrackingWorker(QObject):
                     last_nonempty_result = result
                     last_nonempty_frame_idx = frame_idx
 
-                self._release_engine_resources()
+                self._reset_chunk_resources()
 
                 if stopped or chunk_end == self.end_frame:
                     break
@@ -411,6 +442,7 @@ class AITrackingControllerMixin:
                 return
 
             media_input = self._build_tracking_media_input()
+            polygon_simplification = self._tracking_polygon_simplification_value()
 
             self.tracking_start_frame = self.current_index
             self.tracking_end_frame = end_frame
@@ -440,7 +472,8 @@ class AITrackingControllerMixin:
                 shape_type=seed_ann.shape_type,
                 label_id=seed_ann.label_id,
                 track_id=seed_ann.track_id,
-                chunk_size=32,
+                chunk_size=TrackingWorker.chunk_size_for_model(model_type),
+                polygon_simplification=polygon_simplification,
             )
             self.tracking_worker.moveToThread(self.tracking_thread)
             self.tracking_thread.started.connect(self.tracking_worker.run)
@@ -456,6 +489,15 @@ class AITrackingControllerMixin:
         except Exception as e:
             QMessageBox.critical(self, "오류", f"트랙킹 중 오류가 발생했습니다:\n{str(e)}")
             self._finalize_tracking_ui("오류")
+
+    def _tracking_polygon_simplification_value(self) -> float:
+        """AI Tracking UI에서 선택한 polygon 단순화 강도를 읽는다."""
+        value = float(getattr(self, "tracking_polygon_simplification", 0.005))
+        spin = getattr(self, "ai_tracking_simplification_spin", None)
+        if spin is not None:
+            value = float(spin.value())
+            self.tracking_polygon_simplification = value
+        return max(0.0, value)
 
     def _on_tracking_worker_progress(self, percent: int, frame_idx: int, end_frame: int):
         """워커가 보낸 진행률을 화면 상태와 작업 화면에 반영한다."""

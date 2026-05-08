@@ -29,7 +29,8 @@ class ShapeAnnotationControllerMixin:
     def build_left_toolbar(self):
         """왼쪽 도구 패널에 박스와 폴리곤 생성 버튼을 만든다."""
         panel = QFrame()
-        panel.setFixedWidth(90) # 110 -> 90
+        # allow collapsing fully when user drags splitter
+        panel.setMinimumWidth(0)
         panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         panel.setFrameShape(QFrame.StyledPanel)
 
@@ -129,23 +130,31 @@ class ShapeAnnotationControllerMixin:
             return
 
         valid_payload = []
+        delete_ann_ids = []
         for ann_id, new_data in payload or []:
             if self.store.get_annotation(self.current_index, ann_id) is not None:
-                valid_payload.append((ann_id, new_data))
+                if new_data is None:
+                    delete_ann_ids.append(ann_id)
+                else:
+                    valid_payload.append((ann_id, new_data))
 
-        if not valid_payload:
+        if not valid_payload and not delete_ann_ids:
             return
 
         self.push_undo_state("객체 위치/형태 수정")
 
         selected_ids = self.get_selected_annotation_ids()
         updated_ids = []
+        deleted_set = set(delete_ann_ids)
+        for ann_id in delete_ann_ids:
+            self.store.delete_annotation(self.current_index, ann_id)
         for ann_id, new_data in valid_payload:
             if self.store.update_annotation_data(self.current_index, ann_id, new_data):
                 updated_ids.append(ann_id)
-        if updated_ids:
-            keep = list(dict.fromkeys(selected_ids + updated_ids))
-            self.refresh_annotations_for_current_frame(keep)
+
+        keep = [ann_id for ann_id in selected_ids if ann_id not in deleted_set]
+        keep = list(dict.fromkeys(keep + updated_ids))
+        self.refresh_annotations_for_current_frame(keep)
 
     def cancel_current_drawing(self):
         """현재 진행 중인 그리기나 AI 상호작용 입력을 취소한다."""

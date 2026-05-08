@@ -1,6 +1,7 @@
 # 오른쪽 패널 전체를 관리하는 파일입니다.
 # 객체, 라벨, 타임라인, AI 도구 탭의 목록 갱신과 선택 동기화를 담당합니다.
 from functools import partial
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from PyQt5.QtCore import Qt
@@ -11,6 +12,7 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -33,11 +35,38 @@ from core.common.constants import LABEL_COLOR_PALETTE
 from core.dialogs.dialogs import LabelEditDialog
 
 
+TIMELINE_SORT_ROLE = Qt.UserRole + 100
+
+
+class TimelineTreeWidgetItem(QTreeWidgetItem):
+    def __lt__(self, other):
+        """타임라인 컬럼별 정렬 키를 사용해 숫자 컬럼을 올바르게 정렬한다."""
+        column = self.treeWidget().sortColumn() if self.treeWidget() is not None else 0
+        left = self.data(column, TIMELINE_SORT_ROLE)
+        right = other.data(column, TIMELINE_SORT_ROLE)
+        if left is not None and right is not None:
+            return left < right
+        return super().__lt__(other)
+
+
+def _has_sam2_large_checkpoint() -> bool:
+    """AI Tools 모델 선택에서 SAM2.1 large checkpoint 존재 여부를 확인한다."""
+    project_root = Path(__file__).resolve().parents[2]
+    candidates = [
+        project_root / "weights" / "sam2.1_hiera_large.pt",
+        project_root / "checkpoints" / "sam2.1_hiera_large.pt",
+        project_root / "weights" / "sam2_hiera_large.pt",
+        project_root / "checkpoints" / "sam2_hiera_large.pt",
+    ]
+    return any(path.exists() for path in candidates)
+
+
 class RightPanelControllerMixin:
     def build_right_panel(self):
         """오른쪽 탭 패널을 만들고 각 탭의 버튼과 목록을 배치한다."""
-        self.right_tabs = QTabWidget()        
-        # self.right_tabs.setMinimumWidth(300) # 420 -> 300
+        self.right_tabs = QTabWidget()
+        # allow collapsing fully when user drags splitter
+        self.right_tabs.setMinimumWidth(0)
         self.right_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.right_tabs.currentChanged.connect(self.on_right_tab_changed)
 
@@ -85,6 +114,9 @@ class RightPanelControllerMixin:
         top_filter_layout.addWidget(QLabel("Filter"))
         self.timeline_filter_button = QToolButton()
         self.timeline_filter_button.setText("라벨 필터 ▼")
+        self.timeline_filter_button.setStyleSheet(
+            "QToolButton::menu-indicator { image: none; width: 0px; }"
+        )
         self.timeline_filter_button.setPopupMode(QToolButton.InstantPopup)
         self.timeline_filter_menu = QMenu(self)
         self.timeline_filter_button.setMenu(self.timeline_filter_menu)
@@ -97,7 +129,7 @@ class RightPanelControllerMixin:
         timeline_delete_btn.clicked.connect(self.delete_selected_timeline_annotations)
         timeline_layout.addWidget(timeline_delete_btn)
 
-        timeline_help = QLabel("프레임별 annotation 목록입니다. 삭제만 지원하며, 라벨 필터는 펼침 메뉴에서 제어합니다.")
+        timeline_help = QLabel("프레임별 annotation 목록입니다. 헤더를 눌러 정렬하고, 라벨 필터는 펼침 메뉴에서 제어합니다.")
         timeline_help.setWordWrap(True)
         timeline_layout.addWidget(timeline_help)
 
@@ -112,7 +144,14 @@ class RightPanelControllerMixin:
 
         interact_layout.addWidget(QLabel("Interactor"))
         self.ai_interactor_combo = QComboBox()
-        self.ai_interactor_combo.addItem("Segment Anything 2.0", "sam2")
+        self.ai_interactor_combo.addItem("Segment Anything 2.1 Tiny", "sam2_tiny")
+        large_index = self.ai_interactor_combo.count()
+        self.ai_interactor_combo.addItem("Segment Anything 2.1 Large", "sam2_large")
+        if not _has_sam2_large_checkpoint():
+            large_item = self.ai_interactor_combo.model().item(large_index)
+            if large_item is not None:
+                large_item.setEnabled(False)
+                large_item.setText("Segment Anything 2.1 Large (checkpoint 없음)")
         self.ai_interactor_combo.addItem("Segment Anything 3.0", "sam3")
         interact_layout.addWidget(self.ai_interactor_combo)
 
@@ -148,6 +187,21 @@ class RightPanelControllerMixin:
         self.ai_text_prompt_container.setVisible(False)
         interact_layout.addWidget(self.ai_text_prompt_container)
 
+        interact_simplification_layout = QHBoxLayout()
+        interact_simplification_layout.addWidget(QLabel("단순화 강도"))
+        self.ai_interact_simplification_spin = QDoubleSpinBox()
+        self.ai_interact_simplification_spin.setDecimals(4)
+        self.ai_interact_simplification_spin.setRange(0.0, 0.0200)
+        self.ai_interact_simplification_spin.setSingleStep(0.0010)
+        self.ai_interact_simplification_spin.setValue(
+            float(getattr(self, "ai_interact_polygon_simplification", 0.005))
+        )
+        self.ai_interact_simplification_spin.valueChanged.connect(
+            lambda value: setattr(self, "ai_interact_polygon_simplification", float(value))
+        )
+        interact_simplification_layout.addWidget(self.ai_interact_simplification_spin)
+        interact_layout.addLayout(interact_simplification_layout)
+
         self.ai_interact_button = QPushButton("Interact")
         self.ai_interact_button.clicked.connect(self.on_ai_interact_clicked)
         self.ai_label_selector.currentIndexChanged.connect(self.on_ai_label_selector_changed)
@@ -178,6 +232,21 @@ class RightPanelControllerMixin:
         tracking_button_layout.addWidget(self.tracking_stop_btn)
         tracking_layout.addLayout(tracking_button_layout)
         self.ai_tracking_stop_btn = self.tracking_stop_btn
+
+        simplification_layout = QHBoxLayout()
+        simplification_layout.addWidget(QLabel("단순화 강도"))
+        self.ai_tracking_simplification_spin = QDoubleSpinBox()
+        self.ai_tracking_simplification_spin.setDecimals(4)
+        self.ai_tracking_simplification_spin.setRange(0.0, 0.0200)
+        self.ai_tracking_simplification_spin.setSingleStep(0.0010)
+        self.ai_tracking_simplification_spin.setValue(
+            float(getattr(self, "tracking_polygon_simplification", 0.005))
+        )
+        self.ai_tracking_simplification_spin.valueChanged.connect(
+            lambda value: setattr(self, "tracking_polygon_simplification", float(value))
+        )
+        simplification_layout.addWidget(self.ai_tracking_simplification_spin)
+        tracking_layout.addLayout(simplification_layout)
 
         self.ai_tracking_status_label = QLabel("상태: 준비 중")
         tracking_layout.addWidget(self.ai_tracking_status_label)
@@ -229,7 +298,7 @@ class RightPanelControllerMixin:
         """SAM3 interactor를 선택했을 때 text prompt 입력창을 보여준다."""
         if self.ai_interactor_combo is None or self.ai_text_prompt_container is None:
             return
-        model_type = str(self.ai_interactor_combo.currentData() or "sam2")
+        model_type = str(self.ai_interactor_combo.currentData() or "sam2_tiny")
         self.ai_text_prompt_container.setVisible(model_type == "sam3")
     # 여기까지 수정했다: SAM3 선택 여부에 따라 text prompt 입력창 표시를 갱신한다.
 
@@ -663,7 +732,13 @@ class RightPanelControllerMixin:
     def refresh_timeline_tree(self):
         """전체 프레임의 객체 표시 정보를 타임라인 목록에 다시 채운다."""
         self._syncing_timeline = True
+        sort_column = self.timeline_tree.sortColumn()
+        if sort_column < 0:
+            sort_column = 0
+        sort_order = self.timeline_tree.header().sortIndicatorOrder()
+        sorting_enabled = self.timeline_tree.isSortingEnabled()
         try:
+            self.timeline_tree.setSortingEnabled(False)
             self.timeline_tree.clear()
             self._timeline_anchor_pair = None
             for ann in self.store.all_annotations():
@@ -673,11 +748,20 @@ class RightPanelControllerMixin:
                 class_text = label.class_name if label is not None else "(미지정)"
                 color = QColor(label.color_hex if label is not None else "#888888")
                 display_id = self.annotation_display_id(ann)
-                item = QTreeWidgetItem([str(ann.frame_idx), class_text, str(display_id)])
+                frame_idx = int(ann.frame_idx)
+                display_id = int(display_id)
+                class_key = class_text.casefold()
+                item = TimelineTreeWidgetItem([str(frame_idx), class_text, str(display_id)])
                 item.setData(0, Qt.UserRole, (ann.frame_idx, ann.ann_id))
+                item.setData(0, TIMELINE_SORT_ROLE, (frame_idx, class_key, display_id, int(ann.ann_id)))
+                item.setData(1, TIMELINE_SORT_ROLE, (class_key, frame_idx, display_id, int(ann.ann_id)))
+                item.setData(2, TIMELINE_SORT_ROLE, (display_id, frame_idx, class_key, int(ann.ann_id)))
                 item.setForeground(1, color)
                 self.timeline_tree.addTopLevelItem(item)
         finally:
+            self.timeline_tree.setSortingEnabled(sorting_enabled)
+            if sorting_enabled:
+                self.timeline_tree.sortItems(sort_column, sort_order)
             self._syncing_timeline = False
 
     def on_timeline_item_clicked(self, item):

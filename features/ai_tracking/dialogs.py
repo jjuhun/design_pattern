@@ -4,6 +4,8 @@
 트랙킹 관련 다이얼로그
 """
 
+from pathlib import Path
+
 from PyQt5.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -19,6 +21,18 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 
 
+def _has_sam2_large_checkpoint() -> bool:
+    """선택 UI에서 SAM2.1 large checkpoint 존재 여부를 확인한다."""
+    project_root = Path(__file__).resolve().parents[2]
+    candidates = [
+        project_root / "weights" / "sam2.1_hiera_large.pt",
+        project_root / "checkpoints" / "sam2.1_hiera_large.pt",
+        project_root / "weights" / "sam2_hiera_large.pt",
+        project_root / "checkpoints" / "sam2_hiera_large.pt",
+    ]
+    return any(path.exists() for path in candidates)
+
+
 class SelectSAMModelDialog(QDialog):
     """SAM 모델 선택 다이얼로그"""
     
@@ -27,7 +41,7 @@ class SelectSAMModelDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("SAM 모델 선택")
         self.setModal(True)
-        self.selected_model = "sam2"  # 기본값
+        self.selected_model = "sam2_tiny"  # 기본값
         
         layout = QVBoxLayout(self)
         
@@ -36,15 +50,21 @@ class SelectSAMModelDialog(QDialog):
         
         layout.addWidget(QLabel("트랙킹에 사용할 SAM 모델을 선택하세요:"))
         
-        radio_sam2 = QRadioButton("SAM2 (추천: 빠르고 안정적)")
+        radio_sam2 = QRadioButton("SAM2.1 Tiny (추천: 메모리 절약)")
+        radio_sam2_large = QRadioButton("SAM2.1 Large (고품질, 메모리 사용 큼)")
         radio_sam3 = QRadioButton("SAM3 (더 정확함)")
         
         radio_sam2.setChecked(True)
+        if not _has_sam2_large_checkpoint():
+            radio_sam2_large.setEnabled(False)
+            radio_sam2_large.setText("SAM2.1 Large (weights/sam2.1_hiera_large.pt 없음)")
         
         model_group.addButton(radio_sam2, 0)
-        model_group.addButton(radio_sam3, 1)
+        model_group.addButton(radio_sam2_large, 1)
+        model_group.addButton(radio_sam3, 2)
         
         layout.addWidget(radio_sam2)
+        layout.addWidget(radio_sam2_large)
         layout.addWidget(radio_sam3)
         
         layout.addStretch()
@@ -62,8 +82,10 @@ class SelectSAMModelDialog(QDialog):
     def get_selected_model(self) -> str:
         """선택된 모델 반환"""
         if self.model_group.checkedId() == 1:
+            return "sam2_large"
+        if self.model_group.checkedId() == 2:
             return "sam3"
-        return "sam2"
+        return "sam2_tiny"
 
 
 class TrackingRangeDialog(QDialog):

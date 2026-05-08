@@ -14,7 +14,7 @@ class AIInteractControllerMixin:
         return {
             "ai_interact_pending": bool(self.ai_interact_pending),
             "ai_prompt_mode": self.ai_prompt_mode,
-            "ai_pending_model_type": str(self.ai_pending_model_type or "sam2"),
+            "ai_pending_model_type": str(self.ai_pending_model_type or "sam2_tiny"),
             "ai_pending_box": tuple(self.ai_pending_box) if self.ai_pending_box is not None else None,
             "ai_refinement_points": [tuple(p) for p in self.ai_refinement_points],
             "ai_refinement_labels": [int(v) for v in self.ai_refinement_labels],
@@ -27,7 +27,9 @@ class AIInteractControllerMixin:
         ai_state = ai_state or {}
         self.ai_interact_pending = bool(ai_state.get("ai_interact_pending", False))
         self.ai_prompt_mode = ai_state.get("ai_prompt_mode")
-        self.ai_pending_model_type = str(ai_state.get("ai_pending_model_type") or "sam2")
+        self.ai_pending_model_type = str(ai_state.get("ai_pending_model_type") or "sam2_tiny")
+        if self.ai_pending_model_type == "sam2":
+            self.ai_pending_model_type = "sam2_tiny"
 
         pending_box = ai_state.get("ai_pending_box")
         self.ai_pending_box = tuple(pending_box) if pending_box is not None else None
@@ -143,9 +145,11 @@ class AIInteractControllerMixin:
             QMessageBox.warning(self, "경고", "먼저 미디어를 열고 프레임을 선택하세요.")
             return
 
-        model_type = "sam2"
+        model_type = "sam2_tiny"
         if self.ai_interactor_combo is not None:
-            model_type = str(self.ai_interactor_combo.currentData() or "sam2")
+            model_type = str(self.ai_interactor_combo.currentData() or "sam2_tiny")
+        if model_type == "sam2":
+            model_type = "sam2_tiny"
 
         # 여기서부터 수정하고: 기존 단일 checkbox 대신 bbox/pointer 선택값으로 시작 방식을 정한다.
         prompt_mode = self._selected_ai_initial_prompt_mode()
@@ -241,9 +245,9 @@ class AIInteractControllerMixin:
         self.ai_refinement_labels.append(int(label))
         points = np.array(self.ai_refinement_points, dtype=np.float32)
         labels = np.array(self.ai_refinement_labels, dtype=np.int32)
-        # 박스로 초기화한 뒤 보정 단계에서는 박스 제약을 해제해야
-        # 좌/우클릭 점 보정이 점 입력 모드처럼 실제로 반영된다.
-        prompt_box = self.ai_pending_box if self.ai_prompt_mode != "refine" else None
+        # 박스로 시작한 결과는 refine 때도 초기 박스 제약을 유지해
+        # 포인터 한 번으로 전체 마스크가 과하게 흔들리는 것을 줄인다.
+        prompt_box = self.ai_pending_box
 
         self._execute_ai_single_frame_interact(
             prompt_points=points,
@@ -280,10 +284,15 @@ class AIInteractControllerMixin:
         arr = np.array(ptr).reshape(height, width, 4)
         frame = cv2.cvtColor(arr, cv2.COLOR_RGBA2RGB)
 
-        self.show_status_message(f"{self.ai_pending_model_type.upper()} 단일 프레임 interact 실행 중...")
+        display_model = self.ai_pending_model_type.replace("_", " ").upper()
+        self.show_status_message(f"{display_model} 단일 프레임 interact 실행 중...")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            engine = SAMImageInteractEngine(model_type=self.ai_pending_model_type, device="cuda")
+            engine = SAMImageInteractEngine(
+                model_type=self.ai_pending_model_type,
+                device="cuda",
+                polygon_simplification=self._ai_interact_polygon_simplification_value(),
+            )
             # 박스로 시작한 보정 단계에서는 박스와 점을 함께 사용해 범위 보정을 반영한다.
             if prompt_box is not None and prompt_points is not None and prompt_labels is not None:
                 mask = engine.segment_with_box_and_points(frame, prompt_box, prompt_points, prompt_labels)
@@ -304,8 +313,8 @@ class AIInteractControllerMixin:
                 or "SAM2 config 파일을 찾을 수 없습니다." in err_text
             ):
                 # SAM3 지원이나 체크포인트가 없는 환경에서는 SAM2로 자연스럽게 전환한다.
-                self.ai_pending_model_type = "sam2"
-                self.show_status_message("SAM3를 사용할 수 없어 SAM2로 자동 전환합니다.")
+                self.ai_pending_model_type = "sam2_tiny"
+                self.show_status_message("SAM3를 사용할 수 없어 SAM2.1 Tiny로 자동 전환합니다.")
                 self._execute_ai_single_frame_interact(
                     prompt_points=prompt_points,
                     prompt_labels=prompt_labels,
@@ -335,6 +344,15 @@ class AIInteractControllerMixin:
         if self.canvas is not None:
             self.canvas.show_ai_interact_preview(points, list(zip(self.ai_refinement_points, self.ai_refinement_labels)))
         self.show_status_message("AI Interact: 좌클릭으로 추가, 우클릭으로 제거하세요. 완료하려면 Interact 버튼을 다시 누르세요.")
+
+    def _ai_interact_polygon_simplification_value(self) -> float:
+        """AI Interact UI에서 선택한 polygon 단순화 강도를 읽는다."""
+        value = float(getattr(self, "ai_interact_polygon_simplification", 0.005))
+        spin = getattr(self, "ai_interact_simplification_spin", None)
+        if spin is not None:
+            value = float(spin.value())
+            self.ai_interact_polygon_simplification = value
+        return max(0.0, value)
 
     def _confirm_ai_interact_annotation(self):
         """AI 상호작용 미리보기 결과를 실제 객체 표시 정보로 확정한다."""

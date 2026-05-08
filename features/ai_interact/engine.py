@@ -21,15 +21,35 @@ PolygonData = List[Point]
 
 
 class SAMImageInteractEngine:
-    SAM2_CONFIG_CANDIDATES = [
-        "configs/sam2.1/sam2.1_hiera_l.yaml",
-        "sam2_hiera_l.yaml",
-    ]
-    SAM2_CHECKPOINT_CANDIDATES = [
-        "weights/sam2.1_hiera_large.pt",
-        "checkpoints/sam2.1_hiera_large.pt",
-        "weights/sam2_hiera_large.pt",
-        "checkpoints/sam2_hiera_large.pt",
+    SAM2_MODEL_SPECS = [
+        {
+            "name": "tiny",
+            "configs": [
+                "configs/sam2.1/sam2.1_hiera_t.yaml",
+                "sam2.1_hiera_t.yaml",
+                "sam2_hiera_t.yaml",
+            ],
+            "checkpoints": [
+                "weights/sam2.1_hiera_tiny.pt",
+                "checkpoints/sam2.1_hiera_tiny.pt",
+                "weights/sam2_hiera_tiny.pt",
+                "checkpoints/sam2_hiera_tiny.pt",
+            ],
+        },
+        {
+            "name": "large",
+            "configs": [
+                "configs/sam2.1/sam2.1_hiera_l.yaml",
+                "sam2.1_hiera_l.yaml",
+                "sam2_hiera_l.yaml",
+            ],
+            "checkpoints": [
+                "weights/sam2.1_hiera_large.pt",
+                "checkpoints/sam2.1_hiera_large.pt",
+                "weights/sam2_hiera_large.pt",
+                "checkpoints/sam2_hiera_large.pt",
+            ],
+        }
     ]
 
     SAM3_CONFIG_CANDIDATES = [
@@ -41,12 +61,19 @@ class SAMImageInteractEngine:
         "checkpoints/sam3_hiera_large.pt",
     ]
 
-    def __init__(self, model_type: str = "sam2", device: str = "cuda"):
+    def __init__(
+        self,
+        model_type: str = "sam2",
+        device: str = "cuda",
+        polygon_simplification: float = 0.005,
+    ):
         """단일 프레임 SAM 상호작용 엔진의 모델 종류와 장치를 설정한다."""
         if device != "cuda":
             raise ValueError("SAM interact is configured as GPU-only. Use device='cuda'.")
-        self.model_type = model_type
+        self.model_type = "sam2_tiny" if model_type == "sam2" else model_type
         self.device = device
+        self.polygon_simplification = max(0.0, float(polygon_simplification))
+        self.model_variant = None
         self.predictor = None
 
     def _validate_device(self):
@@ -88,6 +115,39 @@ class SAMImageInteractEngine:
             f"찾은 경로:\n{checked}\n"
             "weights 또는 checkpoints 폴더에 모델 파일을 넣거나 checkpoint 경로를 수정하세요."
         )
+
+    def _resolve_sam2_model_spec(self) -> Tuple[str, List[str], str]:
+        """요청한 SAM2 variant의 checkpoint와 config 후보를 함께 고른다."""
+        if self.model_type == "sam2_tiny":
+            target_variant = "tiny"
+        elif self.model_type == "sam2_large":
+            target_variant = "large"
+        else:
+            raise ValueError(f"SAM2 variant를 알 수 없습니다: {self.model_type}")
+
+        target_spec = None
+        for spec in self.SAM2_MODEL_SPECS:
+            if spec["name"] == target_variant:
+                target_spec = spec
+                break
+
+        if target_spec is None:
+            raise ValueError(f"SAM2 모델 사양을 찾을 수 없습니다: {target_variant}")
+
+        try:
+            checkpoint = self._resolve_existing_path(target_spec["checkpoints"])
+        except FileNotFoundError as exc:
+            expected = (
+                "weights/sam2.1_hiera_tiny.pt"
+                if target_variant == "tiny"
+                else "weights/sam2.1_hiera_large.pt"
+            )
+            raise FileNotFoundError(
+                f"SAM2.1 {target_variant} checkpoint 파일을 찾을 수 없습니다.\n"
+                f"{expected} 위치에 파일을 넣어주세요."
+            ) from exc
+
+        return target_spec["name"], target_spec["configs"], checkpoint
 
     def _import_image_predictor_class(self):
         """설치된 sam2 패키지에서 사용할 수 있는 이미지 예측기 클래스를 찾는다."""
@@ -159,12 +219,13 @@ class SAMImageInteractEngine:
 
         ImagePredictorClass = self._import_image_predictor_class()
 
-        if self.model_type == "sam2":
-            checkpoint = self._resolve_existing_path(self.SAM2_CHECKPOINT_CANDIDATES)
+        if self.model_type in ("sam2_tiny", "sam2_large"):
+            variant, config_candidates, checkpoint = self._resolve_sam2_model_spec()
+            self.model_variant = variant
             builder = getattr(build_sam_module, "build_sam2", None)
             if builder is None:
                 raise ImportError("설치된 sam2 패키지에서 build_sam2를 찾을 수 없습니다.")
-            sam_model = self._build_model_with_candidates(builder, self.SAM2_CONFIG_CANDIDATES, checkpoint)
+            sam_model = self._build_model_with_candidates(builder, config_candidates, checkpoint)
             self.predictor = ImagePredictorClass(sam_model)
             return
 
@@ -319,8 +380,7 @@ class SAMImageInteractEngine:
             raise RuntimeError("SAM image predictor가 유효한 마스크를 반환하지 않았습니다.")
         return mask
 
-    @staticmethod
-    def mask_to_polygon(mask: np.ndarray) -> PolygonData:
+    def mask_to_polygon(self, mask: np.ndarray) -> PolygonData:
         """이진 마스크에서 가장 큰 영역을 폴리곤 좌표로 변환한다."""
         import cv2
 
@@ -330,8 +390,11 @@ class SAMImageInteractEngine:
             return []
 
         largest = max(contours, key=cv2.contourArea)
-        epsilon = 0.005 * cv2.arcLength(largest, True)
-        simplified = cv2.approxPolyDP(largest, epsilon, True)
+        if self.polygon_simplification <= 0:
+            simplified = largest
+        else:
+            epsilon = self.polygon_simplification * cv2.arcLength(largest, True)
+            simplified = cv2.approxPolyDP(largest, epsilon, True)
         return [(float(pt[0][0]), float(pt[0][1])) for pt in simplified]
 
     @staticmethod

@@ -144,60 +144,131 @@ class MouseEventControllerMixin:
         points = data  # type: ignore[assignment]
         return [(x + dx, y + dy) for x, y in points]
 
-    def _drag_bounds_for_annotation(self, ann: RenderAnnotation, data: ShapeData):
-        """객체를 이미지 밖으로 끌고 나가지 않도록 이동 가능 범위를 계산한다."""
+    def _clip_box_data_to_image(self, data: ShapeData) -> Optional[ShapeData]:
+        """박스를 이미지 영역 안에 남은 부분만 보존하도록 자른다."""
         rect = self._image_rect()
         if rect.isNull():
-            return float("-inf"), float("inf"), float("-inf"), float("inf")
+            return data
+        x, y, w, h = data  # type: ignore[misc]
+        x1 = min(float(x), float(x + w))
+        y1 = min(float(y), float(y + h))
+        x2 = max(float(x), float(x + w))
+        y2 = max(float(y), float(y + h))
 
-        if ann.shape_type == "box":
-            x, y, w, h = data  # type: ignore[misc]
-            min_dx = rect.left() - x
-            max_dx = rect.right() - (x + w)
-            min_dy = rect.top() - y
-            max_dy = rect.bottom() - (y + h)
-            return min_dx, max_dx, min_dy, max_dy
+        clipped_left = max(x1, rect.left())
+        clipped_top = max(y1, rect.top())
+        clipped_right = min(x2, rect.right())
+        clipped_bottom = min(y2, rect.bottom())
+        clipped_w = clipped_right - clipped_left
+        clipped_h = clipped_bottom - clipped_top
+        if clipped_w <= 1e-6 or clipped_h <= 1e-6:
+            return None
+        return (clipped_left, clipped_top, clipped_w, clipped_h)
 
-        points = list(data)  # type: ignore[arg-type]
+    def _line_intersection_with_vertical(self, p1: Point, p2: Point, x_edge: float) -> Point:
+        """선분이 수직 경계와 만나는 점을 계산한다."""
+        x1, y1 = p1
+        x2, y2 = p2
+        if abs(x2 - x1) <= 1e-12:
+            return (x_edge, y1)
+        t = (x_edge - x1) / (x2 - x1)
+        return (x_edge, y1 + t * (y2 - y1))
+
+    def _line_intersection_with_horizontal(self, p1: Point, p2: Point, y_edge: float) -> Point:
+        """선분이 수평 경계와 만나는 점을 계산한다."""
+        x1, y1 = p1
+        x2, y2 = p2
+        if abs(y2 - y1) <= 1e-12:
+            return (x1, y_edge)
+        t = (y_edge - y1) / (y2 - y1)
+        return (x1 + t * (x2 - x1), y_edge)
+
+    def _clip_polygon_edge(self, points: PolygonData, inside_fn, intersect_fn) -> PolygonData:
+        """Sutherland-Hodgman 방식으로 폴리곤을 한 경계선에 대해 자른다."""
         if not points:
-            return 0.0, 0.0, 0.0, 0.0
-        min_x = min(p[0] for p in points)
-        max_x = max(p[0] for p in points)
-        min_y = min(p[1] for p in points)
-        max_y = max(p[1] for p in points)
-        min_dx = rect.left() - min_x
-        max_dx = rect.right() - max_x
-        min_dy = rect.top() - min_y
-        max_dy = rect.bottom() - max_y
-        return min_dx, max_dx, min_dy, max_dy
+            return []
+        clipped: PolygonData = []
+        prev = points[-1]
+        prev_inside = inside_fn(prev)
+        for curr in points:
+            curr_inside = inside_fn(curr)
+            if curr_inside:
+                if not prev_inside:
+                    clipped.append(intersect_fn(prev, curr))
+                clipped.append(curr)
+            elif prev_inside:
+                clipped.append(intersect_fn(prev, curr))
+            prev = curr
+            prev_inside = curr_inside
+        return clipped
 
-    def _clamp_drag_delta_for_group(self, ann_ids, requested_dx, requested_dy):
-        """여러 객체를 함께 드래그할 때 허용되는 이동량으로 제한한다."""
-        lo_dx = float("-inf")
-        hi_dx = float("inf")
-        lo_dy = float("-inf")
-        hi_dy = float("inf")
-        for ann_id in ann_ids:
-            ann = self.annotation_models.get(ann_id)
-            data = self._drag_original_data_map.get(ann_id)
-            if ann is None or data is None:
-                continue
-            min_dx, max_dx, min_dy, max_dy = self._drag_bounds_for_annotation(ann, data)
-            lo_dx = max(lo_dx, min_dx)
-            hi_dx = min(hi_dx, max_dx)
-            lo_dy = max(lo_dy, min_dy)
-            hi_dy = min(hi_dy, max_dy)
+    def _dedupe_polygon_points(self, points: PolygonData) -> PolygonData:
+        """클리핑 과정에서 생긴 중복 꼭짓점을 정리한다."""
+        deduped: PolygonData = []
+        for x, y in points:
+            point = (float(x), float(y))
+            if not deduped or abs(deduped[-1][0] - point[0]) > 1e-6 or abs(deduped[-1][1] - point[1]) > 1e-6:
+                deduped.append(point)
+        if (
+            len(deduped) > 1
+            and abs(deduped[0][0] - deduped[-1][0]) <= 1e-6
+            and abs(deduped[0][1] - deduped[-1][1]) <= 1e-6
+        ):
+            deduped.pop()
+        return deduped
 
-        if lo_dx == float("-inf"):
-            lo_dx = requested_dx
-        if hi_dx == float("inf"):
-            hi_dx = requested_dx
-        if lo_dy == float("-inf"):
-            lo_dy = requested_dy
-        if hi_dy == float("inf"):
-            hi_dy = requested_dy
+    def _polygon_area(self, points: PolygonData) -> float:
+        """폴리곤 면적을 계산한다."""
+        if len(points) < 3:
+            return 0.0
+        area = 0.0
+        for idx, (x1, y1) in enumerate(points):
+            x2, y2 = points[(idx + 1) % len(points)]
+            area += x1 * y2 - x2 * y1
+        return abs(area) / 2.0
 
-        return clamp(requested_dx, lo_dx, hi_dx), clamp(requested_dy, lo_dy, hi_dy)
+    def _clip_polygon_data_to_image(self, data: ShapeData) -> Optional[ShapeData]:
+        """폴리곤을 이미지 영역과 겹치는 부분만 남기도록 자른다."""
+        rect = self._image_rect()
+        if rect.isNull():
+            return data
+        points = [(float(x), float(y)) for x, y in data]  # type: ignore[arg-type]
+        left = rect.left()
+        right = rect.right()
+        top = rect.top()
+        bottom = rect.bottom()
+
+        points = self._clip_polygon_edge(
+            points,
+            lambda p: p[0] >= left,
+            lambda p1, p2: self._line_intersection_with_vertical(p1, p2, left),
+        )
+        points = self._clip_polygon_edge(
+            points,
+            lambda p: p[0] <= right,
+            lambda p1, p2: self._line_intersection_with_vertical(p1, p2, right),
+        )
+        points = self._clip_polygon_edge(
+            points,
+            lambda p: p[1] >= top,
+            lambda p1, p2: self._line_intersection_with_horizontal(p1, p2, top),
+        )
+        points = self._clip_polygon_edge(
+            points,
+            lambda p: p[1] <= bottom,
+            lambda p1, p2: self._line_intersection_with_horizontal(p1, p2, bottom),
+        )
+
+        points = self._dedupe_polygon_points(points)
+        if len(points) < 3 or self._polygon_area(points) <= 1e-6:
+            return None
+        return points
+
+    def _clip_shape_data_to_image(self, ann: RenderAnnotation, data: ShapeData) -> Optional[ShapeData]:
+        """객체 표시 정보를 이미지 영역으로 자르고 남은 부분이 없으면 None을 반환한다."""
+        if ann.shape_type == "box":
+            return self._clip_box_data_to_image(data)
+        return self._clip_polygon_data_to_image(data)
 
     # ---------- 다시 그리기 ----------
 
@@ -358,7 +429,8 @@ class MouseEventControllerMixin:
 
     def mouseMoveEvent(self, event):
         """마우스 이동 중 임시 도형, 드래그, 꼭짓점 편집 미리보기를 갱신한다."""
-        scene_pos = self._clamp_point_to_image(self.mapToScene(event.pos()))
+        raw_scene_pos = self.mapToScene(event.pos())
+        scene_pos = self._clamp_point_to_image(raw_scene_pos)
 
         # handle right-button press-then-drag panning
         if event.buttons() & Qt.RightButton and getattr(self, "_pan_possible", False):
@@ -409,9 +481,8 @@ class MouseEventControllerMixin:
             and self._drag_start_scene is not None
             and self._drag_original_data_map
         ):
-            requested_dx = scene_pos.x() - self._drag_start_scene.x()
-            requested_dy = scene_pos.y() - self._drag_start_scene.y()
-            dx, dy = self._clamp_drag_delta_for_group(self._dragging_ann_ids, requested_dx, requested_dy)
+            dx = raw_scene_pos.x() - self._drag_start_scene.x()
+            dy = raw_scene_pos.y() - self._drag_start_scene.y()
             for ann_id in self._dragging_ann_ids:
                 ann = self.annotation_models.get(ann_id)
                 original_data = self._drag_original_data_map.get(ann_id)
@@ -433,7 +504,8 @@ class MouseEventControllerMixin:
             super().mouseReleaseEvent(event)
             return
 
-        scene_pos = self._clamp_point_to_image(self.mapToScene(event.pos()))
+        raw_scene_pos = self.mapToScene(event.pos())
+        scene_pos = self._clamp_point_to_image(raw_scene_pos)
 
         if event.button() == Qt.RightButton:
             if getattr(self, "_panning", False):
@@ -478,9 +550,8 @@ class MouseEventControllerMixin:
             and self._drag_original_data_map
             and event.button() == Qt.LeftButton
         ):
-            requested_dx = scene_pos.x() - self._drag_start_scene.x()
-            requested_dy = scene_pos.y() - self._drag_start_scene.y()
-            dx, dy = self._clamp_drag_delta_for_group(self._dragging_ann_ids, requested_dx, requested_dy)
+            dx = raw_scene_pos.x() - self._drag_start_scene.x()
+            dy = raw_scene_pos.y() - self._drag_start_scene.y()
             moved_payload = []
             if abs(dx) > 1e-6 or abs(dy) > 1e-6:
                 for ann_id in self._dragging_ann_ids:
@@ -488,12 +559,17 @@ class MouseEventControllerMixin:
                     original_data = self._drag_original_data_map.get(ann_id)
                     if ann is None or original_data is None:
                         continue
-                    moved_payload.append((ann_id, self._translate_data(ann, original_data, dx, dy)))
+                    moved_data = self._translate_data(ann, original_data, dx, dy)
+                    moved_payload.append((ann_id, self._clip_shape_data_to_image(ann, moved_data)))
                 if moved_payload:
                     self.annotationsDataUpdateRequested.emit(moved_payload)
 
             self._dragging_ann_ids = []
             self._drag_start_scene = None
+            self._drag_original_data_map = {}
+            self._set_hover_vertex_key(self._vertex_key_at_scene_pos(scene_pos))
+            event.accept()
+            return
 
     def keyPressEvent(self, event):
         """키 입력 처리: Polygon 모드에서 Enter로 폴리곤 확정 처리한다."""

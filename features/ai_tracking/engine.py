@@ -34,26 +34,51 @@ class TrackingResult:
 class SAM2TrackingEngine:
     """SAM2/SAM3 트랙킹 엔진"""
 
-    SAM2_CONFIG_CANDIDATES = [
-        "configs/sam2.1/sam2.1_hiera_l.yaml",
-        "sam2_hiera_l.yaml",
-    ]
-    SAM2_CHECKPOINT_CANDIDATES = [
-        "weights/sam2.1_hiera_large.pt",
-        "checkpoints/sam2.1_hiera_large.pt",
-        "weights/sam2_hiera_large.pt",
-        "checkpoints/sam2_hiera_large.pt",
+    SAM2_MODEL_SPECS = [
+        {
+            "name": "tiny",
+            "configs": [
+                "configs/sam2.1/sam2.1_hiera_t.yaml",
+                "sam2.1_hiera_t.yaml",
+                "sam2_hiera_t.yaml",
+            ],
+            "checkpoints": [
+                "weights/sam2.1_hiera_tiny.pt",
+                "checkpoints/sam2.1_hiera_tiny.pt",
+                "weights/sam2_hiera_tiny.pt",
+                "checkpoints/sam2_hiera_tiny.pt",
+            ],
+        },
+        {
+            "name": "large",
+            "configs": [
+                "configs/sam2.1/sam2.1_hiera_l.yaml",
+                "sam2.1_hiera_l.yaml",
+                "sam2_hiera_l.yaml",
+            ],
+            "checkpoints": [
+                "weights/sam2.1_hiera_large.pt",
+                "checkpoints/sam2.1_hiera_large.pt",
+                "weights/sam2_hiera_large.pt",
+                "checkpoints/sam2_hiera_large.pt",
+            ],
+        }
     ]
     DEFAULT_OFFLOAD_VIDEO_TO_CPU = True
     DEFAULT_OFFLOAD_STATE_TO_CPU = True
     DEFAULT_ASYNC_LOADING_FRAMES = False
     
-    def __init__(self, model_type: str = "sam2", device: str = "cuda"):
+    def __init__(
+        self,
+        model_type: str = "sam2",
+        device: str = "cuda",
+        polygon_simplification: float = 0.005,
+    ):
         """
         트랙킹 엔진의 모델 종류와 실행 장치를 설정한다.
 
         인자:
-            model_type: "sam2" 또는 "sam3"
+            model_type: "sam2_tiny"("sam2"도 호환), "sam2_large" 또는 "sam3"
             device: "cuda" 또는 "cpu"
         """
         if device != "cuda":
@@ -61,8 +86,10 @@ class SAM2TrackingEngine:
                 "SAM interact/tracking is configured as GPU-only. "
                 "Use device='cuda'."
             )
-        self.model_type = model_type
+        self.model_type = "sam2_tiny" if model_type == "sam2" else model_type
         self.device = device
+        self.polygon_simplification = max(0.0, float(polygon_simplification))
+        self.model_variant = None
         self.predictor = None
         self.inference_state = None
         self._temp_frames_dir: Optional[str] = None
@@ -113,6 +140,39 @@ class SAM2TrackingEngine:
             f"찾은 경로:\n{checked}\n"
             "weights 또는 checkpoints 폴더에 모델 파일을 넣거나 checkpoint 경로를 수정하세요."
         )
+
+    def _resolve_sam2_model_spec(self) -> Tuple[str, List[str], str]:
+        """요청한 SAM2 variant의 checkpoint와 config 후보를 함께 고른다."""
+        if self.model_type == "sam2_tiny":
+            target_variant = "tiny"
+        elif self.model_type == "sam2_large":
+            target_variant = "large"
+        else:
+            raise ValueError(f"SAM2 variant를 알 수 없습니다: {self.model_type}")
+
+        target_spec = None
+        for spec in self.SAM2_MODEL_SPECS:
+            if spec["name"] == target_variant:
+                target_spec = spec
+                break
+
+        if target_spec is None:
+            raise ValueError(f"SAM2 모델 사양을 찾을 수 없습니다: {target_variant}")
+
+        try:
+            checkpoint = self._resolve_checkpoint(target_spec["checkpoints"])
+        except FileNotFoundError as exc:
+            expected = (
+                "weights/sam2.1_hiera_tiny.pt"
+                if target_variant == "tiny"
+                else "weights/sam2.1_hiera_large.pt"
+            )
+            raise FileNotFoundError(
+                f"SAM2.1 {target_variant} checkpoint 파일을 찾을 수 없습니다.\n"
+                f"{expected} 위치에 파일을 넣어주세요."
+            ) from exc
+
+        return target_spec["name"], target_spec["configs"], checkpoint
 
     def _build_video_predictor(self, builder, config_candidates: List[str], checkpoint: str):
         """설치된 SAM2 패키지 버전에 맞는 설정을 골라 예측기를 생성한다."""
@@ -342,12 +402,13 @@ class SAM2TrackingEngine:
                 f"현재 실행 중인 Python: {sys.executable}"
             ) from e
 
-        if self.model_type == "sam2":
+        if self.model_type in ("sam2_tiny", "sam2_large"):
             self._validate_device()
-            checkpoint = self._resolve_checkpoint(self.SAM2_CHECKPOINT_CANDIDATES)
+            variant, config_candidates, checkpoint = self._resolve_sam2_model_spec()
+            self.model_variant = variant
             self.predictor = self._build_video_predictor(
                 build_sam2_video_predictor,
-                self.SAM2_CONFIG_CANDIDATES,
+                config_candidates,
                 checkpoint,
             )
         elif self.model_type == "sam3":
@@ -377,7 +438,10 @@ class SAM2TrackingEngine:
         else:
             raise ValueError(f"Unknown model_type: {self.model_type}")
 
-        print(f"✓ {self.model_type.upper()} 모델 로드 완료")
+        if self.model_type in ("sam2_tiny", "sam2_large"):
+            print(f"✓ SAM2.1 {self.model_variant} 모델 로드 완료")
+        else:
+            print(f"✓ {self.model_type.upper()} 모델 로드 완료")
     
     def initialize_tracking(
         self,
@@ -660,9 +724,12 @@ class SAM2TrackingEngine:
         # 가장 큰 외곽선을 사용한다.
         largest_contour = max(contours, key=cv2.contourArea)
         
-        # 외곽선 정밀도를 단순화한다.
-        epsilon = 0.005 * cv2.arcLength(largest_contour, True)
-        simplified = cv2.approxPolyDP(largest_contour, epsilon, True)
+        # 외곽선 정밀도를 단순화한다. 0이면 OpenCV contour를 그대로 사용한다.
+        if self.polygon_simplification <= 0:
+            simplified = largest_contour
+        else:
+            epsilon = self.polygon_simplification * cv2.arcLength(largest_contour, True)
+            simplified = cv2.approxPolyDP(largest_contour, epsilon, True)
         
         # 좌표 변환: (x, y) 형식으로
         points = [(float(pt[0][0]), float(pt[0][1])) for pt in simplified]

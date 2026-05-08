@@ -19,7 +19,8 @@ segment_labeling_UI/
 ├─ requirement.txt
 ├─ README.txt
 ├─ weights/
-│  └─ sam2.1_hiera_large.pt
+│  ├─ sam2.1_hiera_tiny.pt
+│  └─ sam2.1_hiera_large.pt  (선택)
 ├─ features/
 │  ├─ mouse_event/
 │  │  └─ controller.py
@@ -74,7 +75,8 @@ requirement.txt -> 실행에 필요한 Python 패키지 목록입니다.
 
 weights/ -> AI 모델 파일을 넣어두는 폴더입니다.
 - SAM checkpoint 파일을 보관합니다.
-- 현재 AI interact/tracking이 찾는 주요 파일은 sam2.1_hiera_large.pt입니다.
+- 기본 SAM2 모델은 sam2.1_hiera_tiny.pt입니다.
+- sam2.1_hiera_large.pt가 있으면 고품질 Large 옵션도 선택할 수 있습니다.
 
 
 2. features
@@ -204,4 +206,5 @@ python3 main.py
 
 주의:
 - PyQt display 환경, CUDA, SAM checkpoint, GPU 상태에 따라 실행 중 환경 오류가 날 수 있습니다.
-- SAM checkpoint는 weights/sam2.1_hiera_large.pt 위치를 기본으로 사용합니다.
+- SAM checkpoint는 weights/sam2.1_hiera_tiny.pt 위치를 기본으로 사용합니다.
+- weights/sam2.1_hiera_large.pt가 있으면 SAM2.1 Large 선택 옵션이 활성화됩니다.

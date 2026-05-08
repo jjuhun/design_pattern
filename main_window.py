@@ -50,7 +50,7 @@ class MainWindow(
         self.resize(1600, 900)
         # auto_save 관련 변수 : 자동 저장 타이머 상태를 추가.
         self.auto_save_timer = None
-        self.auto_save(n=1)
+        self.auto_save(n=10)
         
         self.last_import_dir = None
 
@@ -87,16 +87,18 @@ class MainWindow(
         self.tracking_seed_label_id: Optional[int] = None
         self.follow_tracking_frames_live = True
         self.tracking_live_follow_stride = 1
+        self.tracking_polygon_simplification = 0.005
         
         # AI 단일 프레임 상호작용 입력 대기 상태
         self.ai_interact_pending = False
         self.ai_prompt_mode: Optional[str] = None  # 가능한 값: "box", "point", "refine"
-        self.ai_pending_model_type = "sam2"
+        self.ai_pending_model_type = "sam2_tiny"
         self.ai_pending_box = None
         self.ai_refinement_points = []
         self.ai_refinement_labels = []
         self.ai_pending_mask = None
         self.ai_pending_polygon = None
+        self.ai_interact_polygon_simplification = 0.005
 
         self.canvas = AnnotationCanvas()
 
@@ -120,6 +122,10 @@ class MainWindow(
         self.timeline_tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.timeline_tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
         self.timeline_tree.header().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.timeline_tree.setSortingEnabled(True)
+        self.timeline_tree.header().setSectionsClickable(True)
+        self.timeline_tree.header().setSortIndicatorShown(True)
+        self.timeline_tree.sortByColumn(0, Qt.AscendingOrder)
         self.timeline_tree.itemClicked.connect(self.on_timeline_item_clicked)
 
         self.frame_slider = QSlider(Qt.Horizontal)
@@ -169,11 +175,13 @@ class MainWindow(
         self.ai_text_prompt_container = None
         self.ai_text_prompt_input = None
         self.ai_interact_button = None
+        self.ai_interact_simplification_spin = None
         # 여기까지 수정했다: AI Tools 입력 방식과 SAM3 text prompt 위젯 상태를 추가했다.
         self.ai_tracking_status_label = None
         self.ai_tracking_progress_label = None
         self.ai_tracking_progress_bar = None
         self.ai_tracking_stop_btn = None
+        self.ai_tracking_simplification_spin = None
         # 여기서부터 수정하고: 오른쪽 패널의 연속 복붙 버튼 상태를 추가했다.
         self.copy_sequence_button = None
         # 여기까지 수정했다: 오른쪽 패널의 연속 복붙 버튼 상태를 추가했다.

@@ -281,20 +281,50 @@ class TopPanelControllerMixin:
         if self.source is None or self.current_index < 0:
             return
 
+        # import 경로가 없으면 자동저장 안 함
+        if not hasattr(self, "last_import_dir") or self.last_import_dir is None:
+            return
+
         try:
             base_name = self._current_media_export_name()
 
-            # 🔥 import 경로가 있으면 그 부모 폴더 사용
-            if hasattr(self, "last_import_dir") and self.last_import_dir is not None:
-                parent_dir = self.last_import_dir.parent
-            else:
-                parent_dir = Path.cwd()  # fallback
+            parent_dir = self.last_import_dir.parent
 
+            # 실제 autosave 폴더
             output_root = parent_dir / f"{base_name}_autosave"
 
-            # 자동저장은 같은 폴더에 계속 덮어쓰기
-            self._export_yolo_dataset_to_dir(output_root, overwrite=True)
+            # 임시 저장 폴더
+            temp_output_root = parent_dir / f".{base_name}_autosave_tmp"
+
+            # 기존 temp 폴더 정리
+            if temp_output_root.exists():
+                shutil.rmtree(temp_output_root, ignore_errors=True)
+
+            # 1. 임시 폴더에 먼저 저장
+            self._export_yolo_dataset_to_dir(
+                temp_output_root,
+                overwrite=False,
+            )
+
+            # 2. 필수 파일 생성 확인
+            data_yaml_path = temp_output_root / "data.yaml"
+            train_txt_path = temp_output_root / "train.txt"
+
+            if not data_yaml_path.exists():
+                raise RuntimeError("data.yaml 생성 실패")
+
+            if not train_txt_path.exists():
+                raise RuntimeError("train.txt 생성 실패")
+
+            # 3. 기존 autosave 삭제
+            if output_root.exists():
+                shutil.rmtree(output_root, ignore_errors=True)
+
+            # 4. temp → 실제 autosave 교체
+            temp_output_root.rename(output_root)
+
             self.show_status_message(f"Auto Save 완료: {output_root}")
+
         except Exception as ex:
             self.show_status_message(f"Auto Save 실패: {str(ex)}")
 
@@ -309,7 +339,6 @@ class TopPanelControllerMixin:
             return
 
         result_dir = Path(import_dir)
-        self.last_import_dir = result_dir
         data_yaml_path = result_dir / "data.yaml"
         labels_train_dir = result_dir / "labels" / "train"
         train_txt_path = result_dir / "train.txt"

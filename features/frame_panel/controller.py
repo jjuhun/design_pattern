@@ -30,7 +30,8 @@ class FramePanelControllerMixin:
         splitter.addWidget(left_panel)
         splitter.addWidget(self.canvas)
         splitter.addWidget(right_panel)
-        splitter.setChildrenCollapsible(False)
+        # allow side panels to be fully collapsed by dragging the splitter
+        splitter.setChildrenCollapsible(True)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
@@ -120,6 +121,7 @@ class FramePanelControllerMixin:
     def open_frames_folder(self):
         """사용자가 선택한 이미지 폴더를 프레임 소스로 연다."""
         folder = QFileDialog.getExistingDirectory(self, "프레임 폴더 선택")
+        self.last_import_dir = Path(folder)
         if not folder:
             return
         try:
@@ -232,6 +234,7 @@ class FramePanelControllerMixin:
             "",
             "Video Files (*.mp4 *.avi *.mov *.mkv *.wmv *.m4v)"
         )
+        self.last_import_dir = Path(file_path).parent
         if not file_path:
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)
