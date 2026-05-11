@@ -49,6 +49,10 @@ python main.py
 
 ---
 
+# AI 모델 설치
+
+---
+
 # SAM2 설치 방법
 
 ## 1. SAM2 Clone 및 설치
@@ -59,8 +63,6 @@ cd sam2
 pip install -e .
 ```
 
----
-
 ## 2. Checkpoint 다운로드
 
 ```bash
@@ -68,13 +70,9 @@ cd checkpoints
 ./download_ckpts.sh
 ```
 
----
-
 ## 3. Checkpoint 파일 복사
 
 다운로드된 `.pt` 파일을 프로젝트의 `weights/` 폴더에 복사하세요.
-
-프로젝트 구조 예시:
 
 ```text
 KITECH_Segmentation/
@@ -83,13 +81,49 @@ KITECH_Segmentation/
 │   └── sam2.1_hiera_large.pt
 ```
 
-복사 예시:
+예시:
 
 ```bash
 cp sam2/checkpoints/*.pt ~/jjh_ws/weights/
 ```
 
 ---
+
+# SAM3 설치 방법
+
+## 1. SAM3 Clone 및 설치
+
+```bash
+git clone <SAM3_REPOSITORY_URL>
+cd sam3
+pip install -e .
+```
+
+## 2. SAM3 Checkpoint 다운로드
+
+SAM3 모델 가중치를 다운로드합니다.
+
+## 3. Checkpoint 파일 복사
+
+다운로드한 checkpoint 파일을 프로젝트의 `weights/` 폴더에 복사하세요.
+
+예시:
+
+```text
+KITECH_Segmentation/
+├── weights/
+│   ├── sam3.pt
+│   ├── sam2.1_hiera_tiny.pt
+│   └── sam2.1_hiera_large.pt
+```
+
+---
+
+# 지원 AI 모델
+
+- SAM2.1 Tiny
+- SAM2.1 Large
+- SAM3
 
 # 프로젝트 구조
 
