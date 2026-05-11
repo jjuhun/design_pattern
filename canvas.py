@@ -23,7 +23,7 @@ from features.shape_annotation.controller import ShapeCanvasMixin
 Point = Tuple[float, float]
 BoxData = Tuple[float, float, float, float]
 PolygonData = List[Point]
-ShapeData = Union[BoxData, PolygonData]
+ShapeData = Union[Point, BoxData, PolygonData]
 
 
 class AnnotationCanvas(
@@ -109,7 +109,7 @@ class AnnotationCanvas(
 
     def set_mode(self, mode: str):
         """작업 화면의 입력 모드를 변경하고 필요한 임시 표시를 정리한다."""
-        if mode not in ("select", "box", "polygon", "ai_point", "ai_refine"):
+        if mode not in ("select", "box", "polygon", "keypoint", "ai_point", "ai_refine"):
             mode = "select"
         if self._mode != mode:
             self._mode = mode

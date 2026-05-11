@@ -22,16 +22,16 @@ from core.annotation.models import RenderAnnotation
 Point = Tuple[float, float]
 BoxData = Tuple[float, float, float, float]
 PolygonData = List[Point]
-ShapeData = Union[BoxData, PolygonData]
+ShapeData = Union[Point, BoxData, PolygonData]
 
 
 class ShapeAnnotationControllerMixin:
     def build_left_toolbar(self):
         """왼쪽 도구 패널에 박스와 폴리곤 생성 버튼을 만든다."""
         panel = QFrame()
-        # allow collapsing fully when user drags splitter
-        panel.setMinimumWidth(0)
-        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        # keep the panel resizable while allowing it to shrink very small in the splitter
+        panel.setMinimumWidth(1)
+        panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         panel.setFrameShape(QFrame.StyledPanel)
 
         layout = QVBoxLayout(panel)
@@ -52,6 +52,13 @@ class ShapeAnnotationControllerMixin:
         self.polygon_button.clicked.connect(lambda checked: self.on_shape_tool_clicked("polygon", checked))
         layout.addWidget(self.polygon_button)
 
+        self.keypoint_button = QToolButton()
+        self.keypoint_button.setText("Keypoint")
+        self.keypoint_button.setCheckable(True)
+        self.keypoint_button.setMinimumHeight(54)
+        self.keypoint_button.clicked.connect(lambda checked: self.on_shape_tool_clicked("keypoint", checked))
+        layout.addWidget(self.keypoint_button)
+
         layout.addStretch()
         return panel
 
@@ -68,10 +75,13 @@ class ShapeAnnotationControllerMixin:
         self.current_mode = mode
         self.box_button.blockSignals(True)
         self.polygon_button.blockSignals(True)
+        self.keypoint_button.blockSignals(True)
         self.box_button.setChecked(mode == "box")
         self.polygon_button.setChecked(mode == "polygon")
+        self.keypoint_button.setChecked(mode == "keypoint")
         self.box_button.blockSignals(False)
         self.polygon_button.blockSignals(False)
+        self.keypoint_button.blockSignals(False)
 
         if mode == "box":
             self.mode_label.setText("현재 상태: Box 생성 모드")
@@ -79,6 +89,9 @@ class ShapeAnnotationControllerMixin:
         elif mode == "polygon":
             self.mode_label.setText("현재 상태: Polygon 생성 모드")
             self.show_status_message("Polygon 모드: 좌클릭 점 추가, 우클릭 점 삭제, Enter 확정, Esc 취소")
+        elif mode == "keypoint":
+            self.mode_label.setText("현재 상태: Keypoint 생성 모드")
+            self.show_status_message("Keypoint 모드: 좌클릭으로 점을 찍으세요.")
         elif mode == "ai_point":
             self.mode_label.setText("현재 상태: AI Point 입력 모드")
             self.show_status_message("AI Point 모드: 대상 물체 위를 좌클릭하세요. (우클릭 취소)")
@@ -109,6 +122,8 @@ class ShapeAnnotationControllerMixin:
             ann = self.store.add_box(self.current_index, payload, label_id)
         elif shape_type == "polygon":
             ann = self.store.add_polygon(self.current_index, payload, label_id)
+        elif shape_type == "keypoint":
+            ann = self.store.add_keypoint(self.current_index, payload, label_id)
         else:
             return
 
@@ -116,7 +131,8 @@ class ShapeAnnotationControllerMixin:
         self.canvas.set_selected_annotations([ann.ann_id])
         self.sync_object_tree_selection([ann.ann_id])
         self.sync_label_list_view([ann.ann_id])
-        self.canvas.set_mode("select")
+        if shape_type != "keypoint":
+            self.canvas.set_mode("select")
 
         if label_id is None:
             self.show_status_message("객체 생성 완료. 라벨을 지정하세요.")
@@ -162,7 +178,7 @@ class ShapeAnnotationControllerMixin:
             self._reset_ai_interact_prompt_state()
             self.show_status_message("AI Interact 입력 대기를 취소했습니다.")
             return
-        if self.current_mode in ("box", "polygon", "ai_point"):
+        if self.current_mode in ("box", "polygon", "keypoint", "ai_point"):
             self.canvas.cancel_temporary_drawing()
             self.canvas.set_mode("select")
             self.show_status_message("현재 생성 작업을 취소했습니다.")
@@ -179,14 +195,18 @@ class ShapeCanvasMixin:
         """도형 외곽선을 그릴 펜을 만든다."""
         color = QColor("#FFD84D") if selected else self._base_color_for_ann(ann)
         pen = QPen(color)
-        pen.setWidthF(1.1 if selected else 0.85)
+        if ann.shape_type == "keypoint":
+            pen.setColor(QColor("#000000"))
+            pen.setWidthF(2.2 if selected else 1.8)
+        else:
+            pen.setWidthF(1.1 if selected else 0.85)
         pen.setCosmetic(True)
         return pen
 
     def _shape_brush(self, ann: RenderAnnotation, selected=False):
         """도형 내부를 옅게 채울 브러시를 만든다."""
         color = QColor("#FFD84D") if selected else self._base_color_for_ann(ann)
-        alpha = 56 if selected else 38
+        alpha = 230 if ann.shape_type == "keypoint" else (56 if selected else 38)
         return QBrush(QColor(color.red(), color.green(), color.blue(), alpha))
 
     def _vertex_pen(self, ann: RenderAnnotation, selected=False, hovered=False):
@@ -221,6 +241,9 @@ class ShapeCanvasMixin:
         if ann.shape_type == "box":
             x, y, w, h = data  # type: ignore[misc]
             return x, max(0, y - 18)
+        if ann.shape_type == "keypoint":
+            x, y = data  # type: ignore[misc]
+            return x + 7, max(0, y - 18)
         pts = list(data)  # type: ignore[arg-type]
         if not pts:
             return 0.0, 0.0
@@ -234,6 +257,8 @@ class ShapeCanvasMixin:
         if ann.shape_type == "box":
             x, y, w, h = data  # type: ignore[misc]
             return [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+        if ann.shape_type == "keypoint":
+            return []
         return list(data)  # type: ignore[arg-type]
 
     def _create_vertex_item(self, x, y, ann_id: int, vertex_index: int):
@@ -270,6 +295,10 @@ class ShapeCanvasMixin:
             if ann.shape_type == "box":
                 x, y, w, h = ann.data  # type: ignore[misc]
                 shape_item = QGraphicsRectItem(x, y, w, h)
+            elif ann.shape_type == "keypoint":
+                x, y = ann.data  # type: ignore[misc]
+                radius = 4.0
+                shape_item = QGraphicsEllipseItem(x - radius, y - radius, radius * 2, radius * 2)
             else:
                 polygon = QPolygonF([QPointF(x, y) for x, y in ann.data])  # type: ignore[arg-type]
                 shape_item = QGraphicsPolygonItem(polygon)
@@ -306,6 +335,10 @@ class ShapeCanvasMixin:
         if ann.shape_type == "box":
             x, y, w, h = data  # type: ignore[misc]
             item.setRect(x, y, w, h)
+        elif ann.shape_type == "keypoint":
+            x, y = data  # type: ignore[misc]
+            radius = 4.0
+            item.setRect(x - radius, y - radius, radius * 2, radius * 2)
         else:
             polygon = QPolygonF([QPointF(x, y) for x, y in data])  # type: ignore[arg-type]
             item.setPolygon(polygon)

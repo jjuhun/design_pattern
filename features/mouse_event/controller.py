@@ -12,7 +12,7 @@ from core.common.utils import clamp
 Point = Tuple[float, float]
 BoxData = Tuple[float, float, float, float]
 PolygonData = List[Point]
-ShapeData = Union[BoxData, PolygonData]
+ShapeData = Union[Point, BoxData, PolygonData]
 
 
 class MouseEventControllerMixin:
@@ -141,6 +141,9 @@ class MouseEventControllerMixin:
         if ann.shape_type == "box":
             x, y, w, h = data  # type: ignore[misc]
             return (x + dx, y + dy, w, h)
+        if ann.shape_type == "keypoint":
+            x, y = data  # type: ignore[misc]
+            return (x + dx, y + dy)
         points = data  # type: ignore[assignment]
         return [(x + dx, y + dy) for x, y in points]
 
@@ -264,10 +267,23 @@ class MouseEventControllerMixin:
             return None
         return points
 
+    def _clip_keypoint_data_to_image(self, data: ShapeData) -> Optional[ShapeData]:
+        """키포인트 좌표를 이미지 영역 안으로 제한한다."""
+        rect = self._image_rect()
+        if rect.isNull():
+            return data
+        x, y = data  # type: ignore[misc]
+        return (
+            clamp(float(x), rect.left(), rect.right()),
+            clamp(float(y), rect.top(), rect.bottom()),
+        )
+
     def _clip_shape_data_to_image(self, ann: RenderAnnotation, data: ShapeData) -> Optional[ShapeData]:
         """객체 표시 정보를 이미지 영역으로 자르고 남은 부분이 없으면 None을 반환한다."""
         if ann.shape_type == "box":
             return self._clip_box_data_to_image(data)
+        if ann.shape_type == "keypoint":
+            return self._clip_keypoint_data_to_image(data)
         return self._clip_polygon_data_to_image(data)
 
     # ---------- 다시 그리기 ----------
@@ -326,6 +342,12 @@ class MouseEventControllerMixin:
                 self._polygon_points.append((scene_pos.x(), scene_pos.y()))
                 self._current_mouse_scene = scene_pos
                 self._update_polygon_preview()
+                event.accept()
+                return
+
+        if self._mode == "keypoint":
+            if event.button() == Qt.LeftButton:
+                self.annotationCreateRequested.emit("keypoint", (scene_pos.x(), scene_pos.y()))
                 event.accept()
                 return
             if event.button() == Qt.RightButton:

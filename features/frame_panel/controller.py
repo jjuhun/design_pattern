@@ -30,7 +30,7 @@ class FramePanelControllerMixin:
         splitter.addWidget(left_panel)
         splitter.addWidget(self.canvas)
         splitter.addWidget(right_panel)
-        # allow side panels to be fully collapsed by dragging the splitter
+        # keep the side panels resizable; their own minimum widths are now near-zero
         splitter.setChildrenCollapsible(True)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)

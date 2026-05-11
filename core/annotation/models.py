@@ -7,7 +7,7 @@ from copy import deepcopy
 Point = Tuple[float, float]
 BoxData = Tuple[float, float, float, float]
 PolygonData = List[Point]
-ShapeData = Union[BoxData, PolygonData]
+ShapeData = Union[Point, BoxData, PolygonData]
 
 
 @dataclass
@@ -41,6 +41,7 @@ class RenderAnnotation:
     label_name: str
     label_id: Optional[int]
     hidden: bool = False
+    keypoint_number: Optional[int] = None
 
 
 @dataclass
@@ -85,13 +86,16 @@ class AnnotationStore:
             self._next_track_ids = {None: legacy_next_track_id}
 
     def _normalize_shape_data(self, shape_type: str, data: ShapeData) -> ShapeData:
-        """박스 또는 폴리곤 좌표 데이터를 저장용 숫자 형태로 정리한다."""
+        """박스, 폴리곤, 키포인트 좌표 데이터를 저장용 숫자 형태로 정리한다."""
         if shape_type == "box":
             x, y, w, h = data  # type: ignore[misc]
             return (float(x), float(y), float(w), float(h))
-        if shape_type != "polygon":
-            raise ValueError("지원하지 않는 shape_type입니다.")
-        return [(float(x), float(y)) for x, y in data]  # type: ignore[list-item]
+        if shape_type == "polygon":
+            return [(float(x), float(y)) for x, y in data]  # type: ignore[list-item]
+        if shape_type == "keypoint":
+            x, y = data  # type: ignore[misc]
+            return (float(x), float(y))
+        raise ValueError("지원하지 않는 shape_type입니다.")
 
     def _allocate_track_id(self, label_id: Optional[int]) -> int:
         """라벨별로 다음 트랙 ID를 발급한다."""
@@ -146,6 +150,17 @@ class AnnotationStore:
         """폴리곤 객체 표시 정보를 프레임에 추가한다."""
         return self._add(frame_idx, "polygon", points, label_id, track_id=track_id, hidden=hidden)
 
+    def add_keypoint(
+        self,
+        frame_idx: int,
+        point: Point,
+        label_id: Optional[int],
+        track_id: Optional[int] = None,
+        hidden: bool = False,
+    ) -> Annotation:
+        """키포인트 객체 표시 정보를 프레임에 추가한다."""
+        return self._add(frame_idx, "keypoint", point, label_id, track_id=track_id, hidden=hidden)
+
     def add_annotation(
         self,
         frame_idx: int,
@@ -160,6 +175,8 @@ class AnnotationStore:
             return self.add_box(frame_idx, data, label_id, track_id=track_id, hidden=hidden)  # type: ignore[arg-type]
         if shape_type == "polygon":
             return self.add_polygon(frame_idx, data, label_id, track_id=track_id, hidden=hidden)  # type: ignore[arg-type]
+        if shape_type == "keypoint":
+            return self.add_keypoint(frame_idx, data, label_id, track_id=track_id, hidden=hidden)  # type: ignore[arg-type]
         raise ValueError("지원하지 않는 shape_type입니다.")
 
     def get_annotations(self, frame_idx: int, include_hidden: bool = True) -> List[Annotation]:

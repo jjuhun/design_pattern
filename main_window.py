@@ -143,6 +143,9 @@ class MainWindow(
 
         self.undo_button = None
         self.redo_button = None
+        self.box_button = None
+        self.polygon_button = None
+        self.keypoint_button = None
         self.first_button = None
         self.back10_button = None
         self.prev_button = None

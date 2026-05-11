@@ -65,9 +65,11 @@ class RightPanelControllerMixin:
     def build_right_panel(self):
         """오른쪽 탭 패널을 만들고 각 탭의 버튼과 목록을 배치한다."""
         self.right_tabs = QTabWidget()
-        # allow collapsing fully when user drags splitter
-        self.right_tabs.setMinimumWidth(0)
-        self.right_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        # keep the panel resizable while allowing it to shrink very small in the splitter
+        self.right_tabs.setMinimumWidth(1)
+        self.right_tabs.setUsesScrollButtons(True)
+        self.right_tabs.tabBar().setExpanding(False)
+        self.right_tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.right_tabs.currentChanged.connect(self.on_right_tab_changed)
 
         # 객체 목록 탭
@@ -538,10 +540,39 @@ class RightPanelControllerMixin:
 
     # ---------- 객체 표시 정보 그리기 ----------
 
-    def render_annotation(self, ann: Annotation) -> RenderAnnotation:
+    def _keypoint_number_map(self, anns: List[Annotation]) -> Dict[int, int]:
+        """현재 프레임에서 keypoint annotation의 생성 순서 번호를 만든다."""
+        keypoints = [ann for ann in sorted(anns, key=lambda item: item.ann_id) if ann.shape_type == "keypoint"]
+        return {ann.ann_id: idx + 1 for idx, ann in enumerate(keypoints)}
+
+    def render_annotation(self, ann: Annotation, keypoint_number: Optional[int] = None) -> RenderAnnotation:
         """저장된 객체 표시 정보를 작업 화면 표시용 데이터로 변환한다."""
         label = self.get_label_by_id(ann.label_id)
         display_id = self.annotation_display_id(ann)
+        if ann.shape_type == "keypoint":
+            number = int(keypoint_number or display_id)
+            label_name = label.class_name if label is not None else "(미지정)"
+            color_hex = label.color_hex if label is not None else "#A0A0A0"
+            object_prefix = f"KP {number}"
+            object_list_text = (
+                f"{label.class_index} {label.class_name} | {object_prefix}"
+                if label is not None
+                else f"{object_prefix} | (미지정)"
+            )
+            return RenderAnnotation(
+                ann_id=ann.ann_id,
+                track_id=display_id,
+                shape_type=ann.shape_type,
+                data=ann.data,
+                color_hex=color_hex,
+                overlay_text=str(number),
+                object_list_text=object_list_text,
+                label_name=label_name,
+                label_id=ann.label_id if label is not None else None,
+                hidden=ann.hidden,
+                keypoint_number=number,
+            )
+
         if label is None:
             return RenderAnnotation(
                 ann_id=ann.ann_id,
@@ -583,8 +614,16 @@ class RightPanelControllerMixin:
             return
 
         all_frame_anns = self.store.get_annotations(self.current_index, include_hidden=True)
-        visible_renders = [self.render_annotation(ann) for ann in all_frame_anns if not ann.hidden]
-        rendered_map = {ann.ann_id: self.render_annotation(ann) for ann in all_frame_anns}
+        keypoint_numbers = self._keypoint_number_map(all_frame_anns)
+        visible_renders = [
+            self.render_annotation(ann, keypoint_numbers.get(ann.ann_id))
+            for ann in all_frame_anns
+            if not ann.hidden
+        ]
+        rendered_map = {
+            ann.ann_id: self.render_annotation(ann, keypoint_numbers.get(ann.ann_id))
+            for ann in all_frame_anns
+        }
         all_ann_ids = [ann.ann_id for ann in all_frame_anns]
 
         prev_selected_ids = keep_selected_ann_ids

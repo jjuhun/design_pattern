@@ -5,7 +5,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from PyQt5.QtCore import QObject, QThread, pyqtSignal
 from PyQt5.QtWidgets import QDialog, QMessageBox
@@ -37,6 +37,7 @@ class TrackingWorker(QObject):
         track_id,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         polygon_simplification: float = 0.005,
+        keypoint_infos: Optional[List[Dict[str, object]]] = None,
     ):
         """트랙킹을 백그라운드에서 실행할 작업 객체 상태를 초기화한다."""
         super().__init__()
@@ -51,6 +52,7 @@ class TrackingWorker(QObject):
         self.track_id = track_id
         self.chunk_size = max(4, int(chunk_size))
         self.polygon_simplification = max(0.0, float(polygon_simplification))
+        self.keypoint_infos = list(keypoint_infos or [])
         self._stop_requested = False
         self.engine = None
         self._temp_subset_dir: Optional[Path] = None
@@ -151,6 +153,61 @@ class TrackingWorker(QObject):
             cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
         return mask
 
+    def _tracking_result_to_bbox(self, result, mask_shape):
+        """트랙킹 결과에서 keypoint 재배치에 사용할 bbox를 계산한다."""
+        if result is None:
+            return None
+        h, w = mask_shape
+        if result.shape_type == "polygon":
+            points = list(result.data or [])
+            if not points:
+                return None
+            xs = [float(x) for x, _y in points]
+            ys = [float(y) for _x, y in points]
+            x1 = clamp(min(xs), 0.0, max(0.0, float(w - 1)))
+            y1 = clamp(min(ys), 0.0, max(0.0, float(h - 1)))
+            x2 = clamp(max(xs), 0.0, max(0.0, float(w - 1)))
+            y2 = clamp(max(ys), 0.0, max(0.0, float(h - 1)))
+            return (x1, y1, max(1.0, x2 - x1), max(1.0, y2 - y1))
+
+        try:
+            x, y, bw, bh = result.data
+        except Exception:
+            return None
+        x1 = clamp(float(x), 0.0, max(0.0, float(w - 1)))
+        y1 = clamp(float(y), 0.0, max(0.0, float(h - 1)))
+        x2 = clamp(float(x) + max(1.0, float(bw)), 0.0, max(0.0, float(w - 1)))
+        y2 = clamp(float(y) + max(1.0, float(bh)), 0.0, max(0.0, float(h - 1)))
+        return (x1, y1, max(1.0, x2 - x1), max(1.0, y2 - y1))
+
+    def _keypoint_payload_from_result(self, frame_idx: int, result, mask_shape):
+        """트랙킹 bbox 안의 상대좌표로 keypoint 결과 payload를 만든다."""
+        bbox = self._tracking_result_to_bbox(result, mask_shape)
+        if bbox is None:
+            return None
+        x, y, bw, bh = bbox
+        h, w = mask_shape
+        points = []
+        for info in self.keypoint_infos:
+            rel_x = float(info.get("rel_x", 0.0))
+            rel_y = float(info.get("rel_y", 0.0))
+            px = clamp(x + rel_x * bw, 0.0, max(0.0, float(w - 1)))
+            py = clamp(y + rel_y * bh, 0.0, max(0.0, float(h - 1)))
+            points.append(
+                {
+                    "track_id": int(info["track_id"]),
+                    "label_id": info.get("label_id"),
+                    "data": (px, py),
+                }
+            )
+        if not points:
+            return None
+        return {
+            "type": "keypoints",
+            "frame_idx": int(frame_idx),
+            "points": points,
+        }
+
     def _release_engine_resources(self):
         """트랙킹 엔진과 GPU 메모리, 임시 폴더를 정리한다."""
         if self.engine is not None:
@@ -187,13 +244,21 @@ class TrackingWorker(QObject):
     def run(self):
         """청크 단위로 트랙킹을 수행하고 진행률과 결과를 신호로 보낸다."""
         saved_count = 0
+        saved_keypoint_count = 0
         stopped = False
         try:
             import numpy as np
             from features.ai_tracking.engine import SAM2TrackingEngine
 
             if self._stop_requested:
-                self.finished.emit({"saved_count": 0, "stopped": True})
+                self.finished.emit(
+                    {
+                        "saved_count": 0,
+                        "saved_keypoint_count": 0,
+                        "stopped": True,
+                        "mode": "keypoint" if self.keypoint_infos else "annotation",
+                    }
+                )
                 return
 
             # 여기서부터 수정하고: 시작/종료 프레임 관계로 트랙킹 방향을 계산한다.
@@ -252,8 +317,16 @@ class TrackingWorker(QObject):
                     if int(np.count_nonzero(result_mask)) == 0:
                         continue
 
-                    self.resultReady.emit((frame_idx, result, self.label_id, self.track_id))
-                    saved_count += 1
+                    if self.keypoint_infos:
+                        keypoint_payload = self._keypoint_payload_from_result(frame_idx, result, mask_shape)
+                        if keypoint_payload is None:
+                            continue
+                        self.resultReady.emit(keypoint_payload)
+                        saved_count += 1
+                        saved_keypoint_count += len(keypoint_payload["points"])
+                    else:
+                        self.resultReady.emit((frame_idx, result, self.label_id, self.track_id))
+                        saved_count += 1
                     last_nonempty_result = result
                     last_nonempty_frame_idx = frame_idx
 
@@ -297,7 +370,14 @@ class TrackingWorker(QObject):
                 chunk_start = last_nonempty_frame_idx
             # 여기까지 수정했다: 역순 트랙킹도 같은 청크 루프로 처리한다.
 
-            self.finished.emit({"saved_count": saved_count, "stopped": stopped})
+            self.finished.emit(
+                {
+                    "saved_count": saved_count,
+                    "saved_keypoint_count": saved_keypoint_count,
+                    "stopped": stopped,
+                    "mode": "keypoint" if self.keypoint_infos else "annotation",
+                }
+            )
         except Exception as e:
             self.error.emit(str(e))
         finally:
@@ -364,10 +444,30 @@ class AITrackingControllerMixin:
         if not current_anns:
             QMessageBox.warning(self, "경고", "현재 프레임에 annotation이 없습니다.\n먼저 annotation을 그려주세요.")
             return
-        seed_ann = self._get_tracking_seed_annotation(current_anns)
-        if seed_ann is None:
-            QMessageBox.warning(self, "경고", "트랙킹 시작 기준 annotation을 찾을 수 없습니다.")
+        selected_anns = self._get_selected_current_annotations(current_anns)
+        keypoint_anns = []
+        seed_ann = None
+        if selected_anns and all(ann.shape_type == "keypoint" for ann in selected_anns):
+            if len(selected_anns) < 2:
+                QMessageBox.warning(self, "경고", "Keypoint 트랙킹은 keypoint를 2개 이상 선택해야 합니다.")
+                return
+            keypoint_anns = sorted(selected_anns, key=lambda ann: ann.ann_id)
+        elif selected_anns and any(ann.shape_type == "keypoint" for ann in selected_anns):
+            QMessageBox.warning(
+                self,
+                "경고",
+                "Keypoint 트랙킹은 keypoint만 여러 개 선택해서 실행하세요.\n"
+                "Box/Polygon 트랙킹은 keypoint 선택을 해제한 뒤 실행하세요.",
+            )
             return
+        else:
+            seed_ann = self._get_tracking_seed_annotation(current_anns)
+            if seed_ann is None:
+                QMessageBox.warning(self, "경고", "트랙킹 시작 기준 annotation을 찾을 수 없습니다.")
+                return
+            if seed_ann.shape_type == "keypoint":
+                QMessageBox.warning(self, "경고", "Keypoint는 단독 트랙킹 대상이 아닙니다.\nKeypoint를 2개 이상 선택하세요.")
+                return
         
         # SAM 모델 선택
         model_dialog = SelectSAMModelDialog(self)
@@ -388,8 +488,12 @@ class AITrackingControllerMixin:
         end_frame = range_dialog.get_end_frame()
         
         # 트랙킹 시작
-        self.push_undo_state("SAM Tracking")
-        self._perform_tracking(selected_model, end_frame, seed_ann)
+        if keypoint_anns:
+            self.push_undo_state("Keypoint Tracking")
+            self._perform_keypoint_tracking(selected_model, end_frame, keypoint_anns)
+        else:
+            self.push_undo_state("SAM Tracking")
+            self._perform_tracking(selected_model, end_frame, seed_ann)
 
     def on_stop_tracking(self):
         """트랙킹 중지 클릭"""
@@ -409,6 +513,13 @@ class AITrackingControllerMixin:
             if ann.ann_id in selected_ids:
                 return ann
         return current_anns[-1] if current_anns else None
+
+    def _get_selected_current_annotations(self, current_anns: List[Annotation]) -> List[Annotation]:
+        """현재 프레임에서 선택된 표시 정보를 프레임 저장 순서대로 반환한다."""
+        selected_ids = set(self.get_selected_annotation_ids())
+        if not selected_ids:
+            return []
+        return [ann for ann in current_anns if ann.ann_id in selected_ids]
 
     def _build_tracking_media_input(self):
         """트랙킹 워커가 읽을 프레임 디렉터리 입력 정보를 만든다."""
@@ -490,6 +601,153 @@ class AITrackingControllerMixin:
             QMessageBox.critical(self, "오류", f"트랙킹 중 오류가 발생했습니다:\n{str(e)}")
             self._finalize_tracking_ui("오류")
 
+    def _build_keypoint_tracking_seed(self, keypoint_anns: List[Annotation], frame_shape: tuple):
+        """선택 keypoint들을 감싸는 임시 mask와 상대좌표 정보를 만든다."""
+        try:
+            import numpy as np
+        except ImportError as ex:
+            raise ImportError("numpy가 필요합니다") from ex
+
+        h, w = int(frame_shape[0]), int(frame_shape[1])
+        if h <= 0 or w <= 0:
+            raise RuntimeError("현재 프레임 크기를 확인할 수 없습니다.")
+
+        points = []
+        for ann in keypoint_anns:
+            x, y = ann.data  # type: ignore[misc]
+            points.append((float(x), float(y)))
+        if len(points) < 2:
+            raise RuntimeError("Keypoint 트랙킹은 keypoint를 2개 이상 선택해야 합니다.")
+
+        xs = [x for x, _y in points]
+        ys = [y for _x, y in points]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        point_w = max_x - min_x
+        point_h = max_y - min_y
+        padding = max(6.0, max(point_w, point_h) * 0.08)
+
+        x1 = min_x - padding
+        y1 = min_y - padding
+        x2 = max_x + padding
+        y2 = max_y + padding
+
+        min_size = 8.0
+        if x2 - x1 < min_size:
+            center_x = (x1 + x2) / 2.0
+            x1 = center_x - min_size / 2.0
+            x2 = center_x + min_size / 2.0
+        if y2 - y1 < min_size:
+            center_y = (y1 + y2) / 2.0
+            y1 = center_y - min_size / 2.0
+            y2 = center_y + min_size / 2.0
+
+        max_x_bound = max(0.0, float(w - 1))
+        max_y_bound = max(0.0, float(h - 1))
+        x1 = clamp(x1, 0.0, max_x_bound)
+        y1 = clamp(y1, 0.0, max_y_bound)
+        x2 = clamp(x2, 0.0, max_x_bound)
+        y2 = clamp(y2, 0.0, max_y_bound)
+        if x2 <= x1:
+            x2 = clamp(x1 + min_size, 0.0, max_x_bound)
+            x1 = clamp(x2 - min_size, 0.0, max_x_bound)
+        if y2 <= y1:
+            y2 = clamp(y1 + min_size, 0.0, max_y_bound)
+            y1 = clamp(y2 - min_size, 0.0, max_y_bound)
+
+        seed_w = max(1.0, x2 - x1)
+        seed_h = max(1.0, y2 - y1)
+        mask = np.zeros((h, w), dtype=np.uint8)
+        ix1 = max(0, min(w - 1, int(round(x1))))
+        iy1 = max(0, min(h - 1, int(round(y1))))
+        ix2 = max(0, min(w - 1, int(round(x2))))
+        iy2 = max(0, min(h - 1, int(round(y2))))
+        mask[iy1:iy2 + 1, ix1:ix2 + 1] = 255
+
+        keypoint_infos = []
+        for ann in keypoint_anns:
+            x, y = ann.data  # type: ignore[misc]
+            label_id = ann.label_id if ann.label_id in self.labels_by_id else None
+            keypoint_infos.append(
+                {
+                    "track_id": int(ann.track_id),
+                    "label_id": label_id,
+                    "rel_x": (float(x) - x1) / seed_w,
+                    "rel_y": (float(y) - y1) / seed_h,
+                }
+            )
+
+        return mask, (x1, y1, seed_w, seed_h), keypoint_infos
+
+    def _perform_keypoint_tracking(self, model_type: str, end_frame: int, keypoint_anns: List[Annotation]):
+        """선택 keypoint들을 감싼 임시 영역을 추적하고 keypoint만 프레임별로 저장한다."""
+        if not self._ensure_cuda_ready():
+            return
+        try:
+            import numpy as np
+        except ImportError as ex:
+            QMessageBox.critical(self, "오류", f"{str(ex)}")
+            return
+
+        try:
+            pixmap = self.source.get_pixmap(self.current_index)
+            if pixmap.isNull():
+                QMessageBox.warning(self, "오류", "현재 프레임을 읽을 수 없습니다.")
+                return
+            frame_shape = (pixmap.height(), pixmap.width())
+            mask, _seed_box, keypoint_infos = self._build_keypoint_tracking_seed(keypoint_anns, frame_shape)
+            if int(np.count_nonzero(mask)) == 0:
+                QMessageBox.warning(self, "오류", "선택한 keypoint들로 유효한 초기 트랙킹 영역을 만들 수 없습니다.")
+                return
+
+            media_input = self._build_tracking_media_input()
+            polygon_simplification = self._tracking_polygon_simplification_value()
+
+            self.tracking_start_frame = self.current_index
+            self.tracking_end_frame = end_frame
+            self.tracking_direction = 1 if self.tracking_end_frame >= self.tracking_start_frame else -1
+            self.tracking_seed_track_id = None
+            self.tracking_seed_label_id = None
+
+            self.is_tracking = True
+            if self.timer.isActive():
+                self.timer.stop()
+                self.play_button.setText("Play")
+            self._set_tracking_button_states(True)
+            self._set_tracking_status("Keypoint 준비 중")
+            self._update_tracking_progress_ui(0, self.tracking_start_frame, self.tracking_end_frame)
+            self.canvas.set_tracking_mode(True)
+
+            self.tracking_thread = QThread(self)
+            self.tracking_worker = TrackingWorker(
+                model_type=model_type,
+                device="cuda",
+                media_input=media_input,
+                mask=mask,
+                start_frame=self.tracking_start_frame,
+                end_frame=self.tracking_end_frame,
+                shape_type="box",
+                label_id=None,
+                track_id=0,
+                chunk_size=TrackingWorker.chunk_size_for_model(model_type),
+                polygon_simplification=polygon_simplification,
+                keypoint_infos=keypoint_infos,
+            )
+            self.tracking_worker.moveToThread(self.tracking_thread)
+            self.tracking_thread.started.connect(self.tracking_worker.run)
+            self.tracking_worker.progress.connect(self._on_tracking_worker_progress)
+            self.tracking_worker.resultReady.connect(self._on_tracking_worker_result_ready)
+            self.tracking_worker.finished.connect(self._on_tracking_worker_finished)
+            self.tracking_worker.error.connect(self._on_tracking_worker_error)
+            self.tracking_worker.finished.connect(self.tracking_thread.quit)
+            self.tracking_worker.error.connect(self.tracking_thread.quit)
+            self.tracking_thread.finished.connect(self._on_tracking_thread_finished)
+            self.tracking_thread.start()
+            self.show_status_message(f"Keypoint 트랙킹 시작: {len(keypoint_anns)}개 keypoint")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"Keypoint 트랙킹 중 오류가 발생했습니다:\n{str(e)}")
+            self._finalize_tracking_ui("오류")
+
     def _tracking_polygon_simplification_value(self) -> float:
         """AI Tracking UI에서 선택한 polygon 단순화 강도를 읽는다."""
         value = float(getattr(self, "tracking_polygon_simplification", 0.005))
@@ -523,6 +781,9 @@ class AITrackingControllerMixin:
     def _on_tracking_worker_result_ready(self, payload):
         """워커가 보낸 트랙킹 결과를 객체 표시 정보 저장소에 반영한다."""
         if self.source is None:
+            return
+        if isinstance(payload, dict) and payload.get("type") == "keypoints":
+            self._on_tracking_worker_keypoints_ready(payload)
             return
         frame_idx, result, label_id, track_id = payload
         if not self._is_valid_tracking_result(result):
@@ -580,26 +841,104 @@ class AITrackingControllerMixin:
             self.sync_object_tree_selection([ann.ann_id])
             self.sync_label_list_view([ann.ann_id])
 
+    def _on_tracking_worker_keypoints_ready(self, payload: Dict[str, object]):
+        """워커가 보낸 keypoint 트랙킹 결과를 저장소에 반영한다."""
+        if self.source is None:
+            return
+        frame_idx = int(payload.get("frame_idx", -1))
+        if frame_idx < 0:
+            return
+        point_payloads = list(payload.get("points") or [])
+        if not point_payloads:
+            return
+
+        ann_ids = []
+        for point_info in point_payloads:
+            try:
+                track_id = int(point_info["track_id"])
+                label_id = point_info.get("label_id")
+                x, y = point_info["data"]
+            except Exception:
+                continue
+            ann, _ = self.store.upsert_annotation(
+                frame_idx,
+                "keypoint",
+                (float(x), float(y)),
+                label_id,
+                track_id=track_id,
+                hidden=False,
+            )
+            ann_ids.append(ann.ann_id)
+
+        if not ann_ids:
+            return
+
+        tracking_direction = getattr(self, "tracking_direction", 1)
+        frame_distance = abs(frame_idx - self.tracking_start_frame)
+        reached_end_frame = (
+            frame_idx >= self.tracking_end_frame
+            if tracking_direction > 0
+            else frame_idx <= self.tracking_end_frame
+        )
+        should_follow_live = (
+            self.follow_tracking_frames_live
+            and max(1, int(self.tracking_live_follow_stride)) > 0
+            and (
+                (frame_distance % max(1, int(self.tracking_live_follow_stride)) == 0)
+                or reached_end_frame
+            )
+        )
+
+        if should_follow_live:
+            self.current_index = clamp(frame_idx, 0, self.source.frame_count() - 1)
+            self.update_frame_view(refresh_timeline=False)
+            self.canvas.set_selected_annotations(ann_ids)
+            self.sync_object_tree_selection(ann_ids)
+            self.sync_label_list_view(ann_ids)
+            return
+
+        if self.current_index == frame_idx:
+            self.refresh_annotations_for_current_frame(ann_ids)
+            self.canvas.set_selected_annotations(ann_ids)
+            self.sync_object_tree_selection(ann_ids)
+            self.sync_label_list_view(ann_ids)
+
     def _on_tracking_worker_finished(self, result_info):
         """트랙킹 워커 완료 결과를 사용자에게 알리고 화면을 정리한다."""
         saved_count = int(result_info.get("saved_count", 0))
+        saved_keypoint_count = int(result_info.get("saved_keypoint_count", 0))
         stopped = bool(result_info.get("stopped", False))
+        mode = str(result_info.get("mode", "annotation"))
 
         if stopped:
             self._set_tracking_status("중지됨")
             self.show_status_message("트랙킹 중지 완료")
+            if mode == "keypoint":
+                message = (
+                    f"Keypoint 트랙킹이 중지되었습니다.\n"
+                    f"지금까지 {saved_count}개 프레임에 {saved_keypoint_count}개 keypoint를 저장했습니다."
+                )
+            else:
+                message = f"트랙킹이 중지되었습니다.\n지금까지 {saved_count}개 프레임 결과를 저장했습니다."
             QMessageBox.information(
                 self,
                 "중지됨",
-                f"트랙킹이 중지되었습니다.\n지금까지 {saved_count}개 프레임 결과를 저장했습니다."
+                message
             )
         else:
             self._set_tracking_status("완료")
             self.show_status_message("트랙킹 완료")
+            if mode == "keypoint":
+                message = (
+                    f"Keypoint 트랙킹 완료!\n"
+                    f"{saved_count}개 프레임에 {saved_keypoint_count}개 keypoint를 저장했습니다."
+                )
+            else:
+                message = f"트랙킹 완료!\n{saved_count}개 프레임 결과를 저장했습니다."
             QMessageBox.information(
                 self,
                 "완료",
-                f"트랙킹 완료!\n{saved_count}개 프레임 결과를 저장했습니다."
+                message
             )
 
         self._finalize_tracking_ui("완료" if not stopped else "중지됨")
@@ -664,5 +1003,7 @@ class AITrackingControllerMixin:
             x, y, bw, bh = ann.data
             x, y, bw, bh = int(x), int(y), int(bw), int(bh)
             cv2.rectangle(mask, (x, y), (x + bw, y + bh), 255, -1)
+        elif ann.shape_type == "keypoint":
+            raise RuntimeError("Keypoint는 트랙킹 대상이 아닙니다. Box 또는 Polygon annotation을 선택하세요.")
         
         return mask
