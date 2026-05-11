@@ -1,25 +1,42 @@
-# Runtime caches
-.cache/
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
 
-# Local session/tool files
-.codex
-
-# Local environment
-.env
-.env.*
+# Virtual env / conda
 .venv/
 venv/
+env/
+*.egg-info/
 
-# Model checkpoints
-weights/*.pt
-weights/*.pth
-weights/*.ckpt
-weights/*.safetensors
-checkpoints/
+# PyQt / cache
+.cache/
+.cache/frames/
+tracking_subset_frames_*/
+sam2_frame_alias_*/
 
-# Notebook, logs, and OS files
-.ipynb_checkpoints/
-*.log
+# OS / editor
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Dataset / export / autosave
+*_autosave/
+*_autosave_tmp/
+.*_autosave_tmp/
+result/
+result_*/
+export/
+export_*/
+
+# Large model weights
+weights/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+
+# Logs
+*.log
