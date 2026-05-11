@@ -1,5 +1,4 @@
-# KITECH_Segmentation
-# Segment Labeling UI
+# KITECH_Segmentation Segment Labeling UI
 
 SAM2 기반 이미지/비디오 annotation 및 tracking 도구입니다.
 
