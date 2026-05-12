@@ -5,10 +5,15 @@ from typing import Dict, List, Optional, Tuple
 from PyQt5.QtCore import QThread, Qt, QTimer
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
+    QMessageBox,
+    QApplication,
+    QActionGroup,
+    QAction,
     QAbstractItemView,
     QLabel,
     QListWidget,
     QMainWindow,
+    QMenu,
     QShortcut,
     QSlider,
     QSpinBox,
@@ -19,6 +24,7 @@ from PyQt5.QtWidgets import (
 
 from canvas import AnnotationCanvas
 from core.annotation.models import AnnotationStore, ClipboardAnnotation, LabelDef
+from core.common.theme import apply_theme, load_theme_key, theme_options
 from features.ai_interact.controller import AIInteractControllerMixin
 from features.ai_tracking.controller import AITrackingControllerMixin, TrackingWorker
 # 여기서부터 수정하고: 연속 복붙 기능 mixin import를 추가했다.
@@ -48,6 +54,10 @@ class MainWindow(
         super().__init__()
         self.setWindowTitle("Segment Labeling UI")
         self.resize(1600, 900)
+        self.theme_actions = {}
+        self.theme_action_group = None
+        self.theme_menu = None
+        self.theme_button = None
         # auto_save 관련 변수 : 자동 저장 타이머 상태를 추가.
         self.auto_save_timer = None
         self.auto_save(n=10)
@@ -72,6 +82,7 @@ class MainWindow(
         self.labels_by_id: Dict[int, LabelDef] = {}
         self.label_order: List[int] = []
         self.next_label_id = 1
+        self._saved_state_snapshot = None
 
         # 타임라인 라벨 필터 상태: None은 미지정, 그 외에는 정수 라벨 ID를 뜻한다.
         self.timeline_filter_state: Dict[Optional[int], bool] = {None: True}
@@ -129,10 +140,12 @@ class MainWindow(
         self.timeline_tree.itemClicked.connect(self.on_timeline_item_clicked)
 
         self.frame_slider = QSlider(Qt.Horizontal)
+        self.frame_slider.setObjectName("frameSlider")
         self.frame_slider.setEnabled(False)
         self.frame_slider.valueChanged.connect(self.go_to_frame)
 
         self.frame_spin = QSpinBox()
+        self.frame_spin.setObjectName("frameSpin")
         self.frame_spin.setEnabled(False)
         self.frame_spin.valueChanged.connect(self.go_to_frame)
         self.total_frames_label = QLabel("/ 0")
@@ -203,6 +216,42 @@ class MainWindow(
 
     # ---------- 화면 구성 ----------
 
+    def create_theme_menu(self, parent=None):
+        """테마 버튼에 연결할 라이트/다크 선택 메뉴를 만든다."""
+        theme_menu = QMenu("테마", parent or self)
+        action_group = QActionGroup(self)
+        action_group.setExclusive(True)
+        self.theme_menu = theme_menu
+        self.theme_action_group = action_group
+        self.theme_actions = {}
+
+        current_theme = load_theme_key()
+        for spec in theme_options():
+            action = QAction(spec.label, self)
+            action.setCheckable(True)
+            action.setData(spec.key)
+            action.setChecked(spec.key == current_theme)
+            action.triggered.connect(lambda checked=False, key=spec.key: self.on_theme_selected(key))
+            action_group.addAction(action)
+            theme_menu.addAction(action)
+            self.theme_actions[spec.key] = action
+
+        return theme_menu
+
+    def on_theme_selected(self, theme_key: str):
+        """사용자가 메뉴에서 선택한 qt-material 테마를 즉시 적용하고 저장한다."""
+        result = apply_theme(QApplication.instance(), theme_key, persist=True)
+        for key, action in self.theme_actions.items():
+            action.setChecked(key == result.key)
+
+        if result.applied:
+            self.refresh_shape_tool_button_styles()
+            self.refresh_right_panel_tab_style()
+            self.show_status_message(f"테마 변경: {result.label}")
+        else:
+            QMessageBox.warning(self, "테마 적용 실패", result.error)
+
+
     def create_shortcuts(self):
         """전역 단축키와 연결될 동작을 등록한다."""
         QShortcut(QKeySequence.Delete, self, activated=self.handle_delete_key)
@@ -234,6 +283,9 @@ class MainWindow(
 
     def closeEvent(self, event):
         """창이 닫힐 때 재생과 열린 프레임 소스를 정리한다."""
+        if not self.confirm_before_context_switch("프로그램 종료"):
+            event.ignore()
+            return        
         if self.timer.isActive():
             self.timer.stop()
         self.close_current_source()

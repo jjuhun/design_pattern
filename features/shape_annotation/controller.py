@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import (
 )
 
 from core.annotation.models import RenderAnnotation
+from core.common.theme import load_theme_key
 
 
 Point = Tuple[float, float]
@@ -29,38 +30,91 @@ class ShapeAnnotationControllerMixin:
     def build_left_toolbar(self):
         """왼쪽 도구 패널에 박스와 폴리곤 생성 버튼을 만든다."""
         panel = QFrame()
-        # keep the panel resizable while allowing it to shrink very small in the splitter
-        panel.setMinimumWidth(1)
-        panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        panel.setMinimumWidth(124)
+        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         panel.setFrameShape(QFrame.StyledPanel)
 
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(10)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(12)
 
         self.box_button = QToolButton()
         self.box_button.setText("Box")
-        self.box_button.setCheckable(True)
-        self.box_button.setMinimumHeight(54)
+        self._setup_shape_tool_button(self.box_button)
         self.box_button.clicked.connect(lambda checked: self.on_shape_tool_clicked("box", checked))
         layout.addWidget(self.box_button)
 
         self.polygon_button = QToolButton()
         self.polygon_button.setText("Polygon")
-        self.polygon_button.setCheckable(True)
-        self.polygon_button.setMinimumHeight(54)
+        self._setup_shape_tool_button(self.polygon_button)
         self.polygon_button.clicked.connect(lambda checked: self.on_shape_tool_clicked("polygon", checked))
         layout.addWidget(self.polygon_button)
 
         self.keypoint_button = QToolButton()
         self.keypoint_button.setText("Keypoint")
-        self.keypoint_button.setCheckable(True)
-        self.keypoint_button.setMinimumHeight(54)
+        self._setup_shape_tool_button(self.keypoint_button)
         self.keypoint_button.clicked.connect(lambda checked: self.on_shape_tool_clicked("keypoint", checked))
         layout.addWidget(self.keypoint_button)
 
         layout.addStretch()
         return panel
+
+
+    def _setup_shape_tool_button(self, button: QToolButton):
+        """왼쪽 도구 버튼이 테마 적용 후에도 버튼처럼 보이고 중앙 정렬되도록 설정한다."""
+        button.setCheckable(True)
+        button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        button.setMinimumSize(104, 56)
+        button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._apply_shape_tool_button_style(button)
+
+    def _shape_tool_button_colors(self):
+        """현재 테마에 맞는 왼쪽 도구 버튼 색상을 반환한다."""
+        if load_theme_key() == "dark":
+            return {
+                "border": "#6f747c",
+                "hover": "#9aa0a6",
+                "checked": "#5f6368",
+                "checked_text": "#ffffff",
+            }
+        return {
+            "border": "#374047",
+            "hover": "#56616a",
+            "checked": "#374047",
+            "checked_text": "#ffffff",
+        }
+
+    def _apply_shape_tool_button_style(self, button: QToolButton):
+        colors = self._shape_tool_button_colors()
+        button.setStyleSheet(
+            f"""
+            QToolButton {{
+                border: 1px solid {colors['border']};
+                border-radius: 4px;
+                padding: 10px 8px;
+                text-align: center;
+                font-weight: 600;
+            }}
+            QToolButton:hover {{
+                border-color: {colors['hover']};
+            }}
+            QToolButton:checked {{
+                background-color: {colors['checked']};
+                border-color: {colors['checked']};
+                color: {colors['checked_text']};
+            }}
+            QToolButton:disabled {{
+                border-color: rgba(128, 128, 128, 90);
+                color: rgba(128, 128, 128, 150);
+            }}
+            """
+        )
+
+    def refresh_shape_tool_button_styles(self):
+        """테마 변경 후 왼쪽 도구 버튼 색상을 다시 적용한다."""
+        for button in (self.box_button, self.polygon_button, self.keypoint_button):
+            if button is not None:
+                self._apply_shape_tool_button_style(button)
 
     def on_shape_tool_clicked(self, tool_name, checked):
         """도형 도구 버튼 선택 상태에 따라 작업 모드를 바꾼다."""

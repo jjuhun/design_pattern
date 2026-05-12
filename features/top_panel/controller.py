@@ -6,47 +6,121 @@ from pathlib import Path
 from typing import List
 
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtWidgets import QApplication, QFileDialog, QLabel, QMessageBox, QPushButton, QProgressBar, QToolBar
+from PyQt5.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QProgressBar,
+    QSizePolicy,
+    QToolBar,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from core.annotation.models import Annotation, ClipboardAnnotation
+from core.common.native_dialogs import get_existing_directory
 from core.common.utils import clamp
 
 
 class TopPanelControllerMixin:
+    def _capture_persist_state(self):
+        """저장 여부 비교에 사용할 현재 상태 스냅샷을 만든다."""
+        return {
+            "store": self.store.snapshot(),
+            "labels_by_id": deepcopy(self.labels_by_id),
+            "label_order": list(self.label_order),
+            "next_label_id": int(self.next_label_id),
+            "current_working_label_id": self.current_working_label_id,
+            "timeline_filter_state": deepcopy(self.timeline_filter_state),
+        }
+
+    def mark_saved_state_baseline(self):
+        """현재 상태를 저장 완료 기준 상태로 기록한다."""
+        self._saved_state_snapshot = self._capture_persist_state()
+
+    def has_unsaved_changes(self) -> bool:
+        """현재 상태가 마지막 저장 기준과 다른지 반환한다."""
+        if self.source is None or self.current_index < 0:
+            return False
+        baseline = getattr(self, "_saved_state_snapshot", None)
+        if baseline is None:
+            return True
+        return self._capture_persist_state() != baseline
+
+    def confirm_before_context_switch(self, action_text: str) -> bool:
+        """컨텍스트 전환 전에 미저장 변경사항 처리 여부를 확인한다."""
+        if not self.has_unsaved_changes():
+            return True
+
+        message_box = QMessageBox(self)
+        message_box.setIcon(QMessageBox.Warning)
+        message_box.setWindowTitle("미저장 변경사항")
+        message_box.setText("저장되지 않은 변경사항이 있습니다.")
+        message_box.setInformativeText(f"{action_text} 전에 변경사항을 저장하시겠습니까?")
+
+        save_button = message_box.addButton("저장 후 계속", QMessageBox.AcceptRole)
+        discard_button = message_box.addButton("저장 안 함", QMessageBox.DestructiveRole)
+        cancel_button = message_box.addButton("취소", QMessageBox.RejectRole)
+
+        message_box.setDefaultButton(save_button)
+        message_box.setEscapeButton(cancel_button)
+        message_box.exec_()
+
+        clicked_button = message_box.clickedButton()
+        if clicked_button is cancel_button:
+            return False
+        if clicked_button is save_button:
+            return bool(self.on_save_clicked())
+        if clicked_button is discard_button:
+            self.show_status_message("미저장 변경사항을 저장하지 않고 계속합니다.")
+            return True
+        return False
     
     def create_top_toolbar(self):
-        """맨 위 도구 모음을 만들고 버튼을 기존 동작에 연결한다."""
+        """맨 위 영역을 작업 버튼 줄과 현재 미디어 정보 줄로 나누어 만든다."""
         toolbar = QToolBar("Top Toolbar")
         toolbar.setMovable(False)
+        toolbar.setFloatable(False)
         self.addToolBar(Qt.TopToolBarArea, toolbar)
+
+        toolbar_host = QWidget(toolbar)
+        toolbar_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        toolbar_layout = QVBoxLayout(toolbar_host)
+        toolbar_layout.setContentsMargins(8, 6, 8, 6)
+        toolbar_layout.setSpacing(6)
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(12)
 
         open_frames_btn = QPushButton("Open Frames")
         open_frames_btn.clicked.connect(self.open_frames_folder)
-        toolbar.addWidget(open_frames_btn)
+        button_row.addWidget(open_frames_btn)
 
         open_video_btn = QPushButton("Open Video")
         open_video_btn.clicked.connect(self.open_video_file)
-        toolbar.addWidget(open_video_btn)
+        button_row.addWidget(open_video_btn)
 
         import_btn = QPushButton("Import")
         import_btn.clicked.connect(self.on_import_clicked)
-        toolbar.addWidget(import_btn)
+        button_row.addWidget(import_btn)
 
         export_btn = QPushButton("Export")
         export_btn.clicked.connect(self.on_save_clicked)
-        toolbar.addWidget(export_btn)
+        button_row.addWidget(export_btn)
 
         self.undo_button = QPushButton("Undo")
         self.undo_button.clicked.connect(self.undo_last_action)
         self.undo_button.setEnabled(False)
-        toolbar.addWidget(self.undo_button)
+        button_row.addWidget(self.undo_button)
 
         self.redo_button = QPushButton("Redo")
         self.redo_button.clicked.connect(self.redo_last_action)
         self.redo_button.setEnabled(False)
-        toolbar.addWidget(self.redo_button)
-
-        toolbar.addSeparator()
+        button_row.addWidget(self.redo_button)
 
         self.tracking_progress_bar = QProgressBar()
         self.tracking_progress_bar.setMinimum(0)
@@ -56,18 +130,32 @@ class TopPanelControllerMixin:
         self.tracking_progress_bar.setFormat("Tracking %p%")
         self.tracking_progress_bar.setVisible(False)
         self.tracking_progress_bar.setFixedWidth(260)
-        toolbar.addWidget(self.tracking_progress_bar)
+        button_row.addWidget(self.tracking_progress_bar)
 
-        toolbar.addSeparator()
-        toolbar.addWidget(QLabel("미디어: "))
-        toolbar.addWidget(self.media_label)
+        button_row.addStretch(1)
 
-        toolbar.addSeparator()
-        toolbar.addWidget(QLabel("프레임명: "))
-        toolbar.addWidget(self.frame_name_label)
+        self.theme_button = QToolButton()
+        self.theme_button.setText("Theme")
+        self.theme_button.setPopupMode(QToolButton.InstantPopup)
+        self.theme_button.setMenu(self.create_theme_menu(self.theme_button))
+        self.theme_button.setMinimumWidth(96)
+        button_row.addWidget(self.theme_button)
 
-        toolbar.addSeparator()
-        toolbar.addWidget(self.mode_label)
+        info_row = QHBoxLayout()
+        info_row.setContentsMargins(0, 0, 0, 0)
+        info_row.setSpacing(8)
+        info_row.addWidget(QLabel("미디어:"))
+        info_row.addWidget(self.media_label)
+        info_row.addSpacing(36)
+        info_row.addWidget(QLabel("프레임명:"))
+        info_row.addWidget(self.frame_name_label)
+        info_row.addSpacing(36)
+        info_row.addWidget(self.mode_label)
+        info_row.addStretch(1)
+
+        toolbar_layout.addLayout(button_row)
+        toolbar_layout.addLayout(info_row)
+        toolbar.addWidget(toolbar_host)
 
     def _annotation_points_for_yolo_segment(self, ann: Annotation):
         """YOLO 세그먼트 저장에 사용할 객체 표시 정보의 점 목록을 만든다."""
@@ -221,15 +309,15 @@ class TopPanelControllerMixin:
             "skipped_invalid": skipped_invalid,
         }
 
-    def on_save_clicked(self):
+    def on_save_clicked(self, _checked=False):
         """수동 Export: 선택 폴더 아래 result, result_1, result_2 ... 형태로 새 저장 폴더를 만든다."""
         if self.source is None or self.current_index < 0:
             QMessageBox.warning(self, "경고", "먼저 프레임 소스를 열어주세요.")
-            return
+            return False
 
-        selected_dir = QFileDialog.getExistingDirectory(self, "Export 저장 위치 선택", "")
+        selected_dir = get_existing_directory(self, "Export 저장 위치 선택", "")
         if not selected_dir:
-            return
+            return False
 
         output_parent = Path(selected_dir)
         output_root = self._make_unique_result_dir(output_parent)
@@ -239,9 +327,11 @@ class TopPanelControllerMixin:
             result = self._export_yolo_dataset_to_dir(output_root, overwrite=False)
         except Exception as ex:
             QMessageBox.critical(self, "오류", f"YOLO Dataset export 중 오류가 발생했습니다:\n{str(ex)}")
-            return
+            return False
         finally:
             QApplication.restoreOverrideCursor()
+        
+        self.mark_saved_state_baseline()
 
         self.show_status_message(
             f"Export 완료: {output_root.name}, {result['exported_files']}개 txt, {result['exported_segments']}개 세그먼트"
@@ -259,7 +349,8 @@ class TopPanelControllerMixin:
                 f"스킵(유효하지 않은 도형): {result['skipped_invalid']}"
             ),
         )
-
+        return True
+    
     def auto_save(self, n=10):
         """n분마다 autosave_result 폴더에 자동 저장한다. 같은 폴더에 계속 덮어쓴다."""
         if not hasattr(self, "auto_save_timer") or self.auto_save_timer is None:
@@ -288,7 +379,11 @@ class TopPanelControllerMixin:
         try:
             base_name = self._current_media_export_name()
 
-            parent_dir = self.last_import_dir.parent
+            media_type = getattr(self.source, "media_type", lambda: "")()
+            if media_type == "image_folder":
+                parent_dir = self.last_import_dir.parent
+            else:
+                parent_dir = self.last_import_dir
 
             # 실제 autosave 폴더
             output_root = parent_dir / f"{base_name}_autosave"
@@ -323,18 +418,23 @@ class TopPanelControllerMixin:
             # 4. temp → 실제 autosave 교체
             temp_output_root.rename(output_root)
 
+            self.mark_saved_state_baseline()
+
             self.show_status_message(f"Auto Save 완료: {output_root}")
 
         except Exception as ex:
             self.show_status_message(f"Auto Save 실패: {str(ex)}")
 
-    def on_import_clicked(self):
+    def on_import_clicked(self, _checked=False):
         """YOLO Segment export 결과 폴더를 불러와 현재 열린 프레임에 annotation을 복원한다."""
         if self.source is None or self.current_index < 0:
             QMessageBox.warning(self, "경고", "먼저 Open Frames 또는 Open Video로 원본 프레임을 열어주세요.")
             return
-
-        import_dir = QFileDialog.getExistingDirectory(self, "Import result 폴더 선택", "")
+        
+        if not self.confirm_before_context_switch("다른 annotation 파일 불러오기"):
+            return
+        
+        import_dir = get_existing_directory(self, "Import result 폴더 선택", "")
         if not import_dir:
             return
 
@@ -362,6 +462,8 @@ class TopPanelControllerMixin:
         finally:
             QApplication.restoreOverrideCursor()
 
+        self.mark_saved_state_baseline()
+        
         self.show_status_message(
             f"Import 완료: 라벨 {imported_info['label_count']}개, 객체 {imported_info['annotation_count']}개"
         )

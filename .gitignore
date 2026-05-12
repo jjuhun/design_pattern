@@ -31,9 +31,15 @@ result_*/
 export/
 export_*/
 
-# Large model weights
+# Large model weights / checkpoints
 weights/
 checkpoints/
+
+*weight*/
+*weights*/
+*checkpoint*/
+*checkpoints*/
+
 *.pt
 *.pth
 *.onnx

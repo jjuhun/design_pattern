@@ -7,8 +7,9 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QMessageBox, QPushButton, QSplitter, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QApplication, QHBoxLayout, QMessageBox, QPushButton, QSplitter, QVBoxLayout, QWidget
 
+from core.common.native_dialogs import get_existing_directory, get_open_file_name
 from core.common.utils import clamp
 from features.frame_panel.sources import CachedFrameSource, FrameSourceBase, ImageFolderSource
 
@@ -117,13 +118,16 @@ class FramePanelControllerMixin:
         
         self.refresh_timeline_tree()
         self.update_frame_view()
-
-    def open_frames_folder(self):
+        self.mark_saved_state_baseline()
+        
+    def open_frames_folder(self, _checked=False):
         """사용자가 선택한 이미지 폴더를 프레임 소스로 연다."""
-        folder = QFileDialog.getExistingDirectory(self, "프레임 폴더 선택")
-        self.last_import_dir = Path(folder)
+        folder = get_existing_directory(self, "프레임 폴더 선택")
         if not folder:
             return
+        if not self.confirm_before_context_switch("다른 이미지 폴더 불러오기"):
+            return
+        self.last_import_dir = Path(folder)
         try:
             self.load_source(ImageFolderSource(folder))
         except Exception as e:
@@ -226,17 +230,19 @@ class FramePanelControllerMixin:
         )
         return cache_dir, fps, frame_idx, False
 
-    def open_video_file(self):
+    def open_video_file(self, _checked=False):
         """사용자가 선택한 비디오 파일을 프레임 캐시로 변환해 연다."""
-        file_path, _ = QFileDialog.getOpenFileName(
+        file_path, _ = get_open_file_name(
             self,
             "비디오 파일 선택",
             "",
             "Video Files (*.mp4 *.avi *.mov *.mkv *.wmv *.m4v)"
         )
-        self.last_import_dir = Path(file_path).parent
         if not file_path:
             return
+        if not self.confirm_before_context_switch("다른 비디오 불러오기"):
+            return
+        self.last_import_dir = Path(file_path).parent
         QApplication.setOverrideCursor(Qt.WaitCursor)
         self.statusBar().showMessage("비디오 프레임 캐시 준비 중...")
         try:

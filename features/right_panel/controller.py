@@ -32,6 +32,7 @@ from PyQt5.QtWidgets import (
 
 from core.annotation.models import Annotation, LabelDef, RenderAnnotation
 from core.common.constants import LABEL_COLOR_PALETTE
+from core.common.theme import load_theme_key
 from core.dialogs.dialogs import LabelEditDialog
 
 
@@ -65,6 +66,7 @@ class RightPanelControllerMixin:
     def build_right_panel(self):
         """오른쪽 탭 패널을 만들고 각 탭의 버튼과 목록을 배치한다."""
         self.right_tabs = QTabWidget()
+        self.right_tabs.setObjectName("rightPanelTabs")
         # keep the panel resizable while allowing it to shrink very small in the splitter
         self.right_tabs.setMinimumWidth(1)
         self.right_tabs.setUsesScrollButtons(True)
@@ -75,7 +77,6 @@ class RightPanelControllerMixin:
         # 객체 목록 탭
         self.objects_tab = QWidget()
         objects_layout = QVBoxLayout(self.objects_tab)
-        objects_layout.addWidget(QLabel("Objects"))
         objects_layout.addWidget(self.object_tree)
 
         delete_obj_btn = QPushButton("Delete Selected Object")
@@ -89,7 +90,6 @@ class RightPanelControllerMixin:
         # 라벨 목록 탭
         self.labels_tab = QWidget()
         labels_layout = QVBoxLayout(self.labels_tab)
-        labels_layout.addWidget(QLabel("Labels"))
         labels_layout.addWidget(self.label_list)
 
         add_label_btn = QPushButton("Add Label")
@@ -138,7 +138,6 @@ class RightPanelControllerMixin:
         # AI 도구 탭(단일 프레임 상호작용)
         self.ai_tools_tab = QWidget()
         ai_layout = QVBoxLayout(self.ai_tools_tab)
-        ai_layout.addWidget(QLabel("AI Tools"))
 
         # 여기서부터 수정하고: Interact 영역을 별도 그룹으로 묶고 bbox/pointer/text prompt UI를 추가했다.
         interact_group = QGroupBox("Interact")
@@ -228,7 +227,7 @@ class RightPanelControllerMixin:
         self.tracking_start_btn.setEnabled(False)
         tracking_button_layout.addWidget(self.tracking_start_btn)
 
-        self.tracking_stop_btn = QPushButton("⏹ Stop Tracking")
+        self.tracking_stop_btn = QPushButton("■ Stop Tracking")
         self.tracking_stop_btn.clicked.connect(self.on_stop_tracking)
         self.tracking_stop_btn.setEnabled(False)
         tracking_button_layout.addWidget(self.tracking_stop_btn)
@@ -270,7 +269,6 @@ class RightPanelControllerMixin:
         # 여기서부터 수정하고: 연속 복붙 기능을 AI Tools 내부가 아닌 오른쪽 패널의 별도 탭으로 옮겼다.
         self.copy_sequence_tab = QWidget()
         copy_sequence_layout = QVBoxLayout(self.copy_sequence_tab)
-        copy_sequence_layout.addWidget(QLabel("Copy Sequence"))
         self.copy_sequence_button = QPushButton("Paste Range")
         self.copy_sequence_button.clicked.connect(self.on_copy_sequence_clicked)
         copy_sequence_layout.addWidget(self.copy_sequence_button)
@@ -287,7 +285,204 @@ class RightPanelControllerMixin:
         # 여기서부터 수정하고: Copy 탭을 오른쪽 패널 탭 목록에 추가했다.
         self.right_tabs.addTab(self.copy_sequence_tab, "Copy")
         # 여기까지 수정했다: Copy 탭을 오른쪽 패널 탭 목록에 추가했다.
+        self.refresh_right_panel_tab_style()
         return self.right_tabs
+
+
+    def refresh_right_panel_tab_style(self):
+        """오른쪽 패널 탭과 입력 컨트롤의 accent 색상을 현재 테마에 맞춰 조정한다."""
+        if self.right_tabs is None:
+            return
+
+        theme_key = load_theme_key()
+        asset_root = Path(__file__).resolve().parents[2] / "resources" / "ui"
+        if theme_key == "dark":
+            tab_text = "#9aa0a6"
+            tab_hover = "#d7dce2"
+            accent = "#ffffff"
+            selection = "rgba(255, 255, 255, 45)"
+            icon_suffix = "white"
+            tree_bg = "#202428"
+            tree_alt_bg = "#262b30"
+            tree_header_bg = "#252a2f"
+            tree_text = "#f1f3f4"
+            tree_muted_text = "#c9d1d9"
+            tree_border = "#343a40"
+            tree_selection_bg = "rgba(255, 255, 255, 0.2)"
+            tree_selection_text = "#ffffff"
+            tree_focus_selection_bg = "#ffffff"
+            tree_focus_selection_text = "#263238"
+            tree_hover_bg = "#30363b"
+            tree_widget_hover_bg = "rgba(255, 255, 255, 30)"
+        else:
+            tab_text = "#6f747c"
+            tab_hover = "#374047"
+            accent = "#374047"
+            selection = "rgba(55, 64, 71, 45)"
+            icon_suffix = "gray"
+            tree_bg = "#ffffff"
+            tree_alt_bg = "#f3f5f6"
+            tree_header_bg = "#eceff1"
+            tree_text = "#263238"
+            tree_muted_text = "#4f5b62"
+            tree_border = "#d5d8da"
+            tree_selection_bg = "#dfe7ec"
+            tree_selection_text = "#263238"
+            tree_focus_selection_bg = "#374047"
+            tree_focus_selection_text = "#ffffff"
+            tree_hover_bg = "#edf2f5"
+            tree_widget_hover_bg = "rgba(55, 64, 71, 25)"
+
+        arrow_down = (asset_root / f"arrow_down_{icon_suffix}.svg").as_posix()
+        arrow_up = (asset_root / f"arrow_up_{icon_suffix}.svg").as_posix()
+        checkbox_unchecked = (asset_root / f"checkbox_unchecked_{icon_suffix}.svg").as_posix()
+        checkbox_checked = (asset_root / f"checkbox_checked_{icon_suffix}.svg").as_posix()
+
+        self.right_tabs.setStyleSheet(
+            f"""
+            QTabWidget#rightPanelTabs QTabBar::tab {{
+                color: {tab_text};
+            }}
+            QTabWidget#rightPanelTabs QTabBar::tab:hover {{
+                color: {tab_hover};
+            }}
+            QTabWidget#rightPanelTabs QTabBar::tab:selected {{
+                color: {accent};
+            }}
+            QTabWidget#rightPanelTabs QTabBar::tab:selected:top,
+            QTabWidget#rightPanelTabs QTabBar::tab:selected:bottom {{
+                border-color: {accent};
+            }}
+
+            QTabWidget#rightPanelTabs QComboBox,
+            QTabWidget#rightPanelTabs QSpinBox,
+            QTabWidget#rightPanelTabs QDoubleSpinBox,
+            QTabWidget#rightPanelTabs QLineEdit {{
+                color: {accent};
+                border-color: {accent};
+                border-bottom: 1px solid {accent};
+                selection-background-color: {selection};
+            }}
+
+            QTabWidget#rightPanelTabs QComboBox:hover,
+            QTabWidget#rightPanelTabs QSpinBox:hover,
+            QTabWidget#rightPanelTabs QDoubleSpinBox:hover,
+            QTabWidget#rightPanelTabs QLineEdit:hover,
+            QTabWidget#rightPanelTabs QComboBox:focus,
+            QTabWidget#rightPanelTabs QSpinBox:focus,
+            QTabWidget#rightPanelTabs QDoubleSpinBox:focus,
+            QTabWidget#rightPanelTabs QLineEdit:focus {{
+                border-color: {accent};
+                border-bottom: 1px solid {accent};
+            }}
+
+            QTabWidget#rightPanelTabs QComboBox::drop-down {{
+                border: none;
+                background: transparent;
+                width: 26px;
+            }}
+            QTabWidget#rightPanelTabs QComboBox::down-arrow {{
+                image: url({arrow_down});
+                width: 10px;
+                height: 10px;
+            }}
+
+            QTabWidget#rightPanelTabs QSpinBox::up-button,
+            QTabWidget#rightPanelTabs QSpinBox::down-button,
+            QTabWidget#rightPanelTabs QDoubleSpinBox::up-button,
+            QTabWidget#rightPanelTabs QDoubleSpinBox::down-button {{
+                border: none;
+                background: transparent;
+                width: 22px;
+            }}
+            QTabWidget#rightPanelTabs QSpinBox::up-arrow,
+            QTabWidget#rightPanelTabs QDoubleSpinBox::up-arrow {{
+                image: url({arrow_up});
+                width: 9px;
+                height: 9px;
+            }}
+            QTabWidget#rightPanelTabs QSpinBox::down-arrow,
+            QTabWidget#rightPanelTabs QDoubleSpinBox::down-arrow {{
+                image: url({arrow_down});
+                width: 9px;
+                height: 9px;
+            }}
+
+            QTabWidget#rightPanelTabs QCheckBox::indicator {{
+                image: url({checkbox_unchecked});
+                width: 18px;
+                height: 18px;
+            }}
+            QTabWidget#rightPanelTabs QCheckBox::indicator:checked {{
+                image: url({checkbox_checked});
+                width: 18px;
+                height: 18px;
+            }}
+
+            QTabWidget#rightPanelTabs QProgressBar::chunk {{
+                background-color: {accent};
+            }}
+
+            QTabWidget#rightPanelTabs QTreeWidget {{
+                color: {tree_text};
+                background-color: {tree_bg};
+                alternate-background-color: {tree_alt_bg};
+                border: 1px solid {tree_border};
+                outline: 0;
+            }}
+            QTabWidget#rightPanelTabs QTreeWidget::item {{
+                min-height: 30px;
+                padding: 2px 6px;
+            }}
+            QTabWidget#rightPanelTabs QTreeWidget::item:hover {{
+                background-color: {tree_hover_bg};
+                color: {tree_text};
+            }}
+            QTabWidget#rightPanelTabs QTreeWidget::item:selected,
+            QTabWidget#rightPanelTabs QTreeWidget::item:selected:!active {{
+                background-color: {tree_selection_bg};
+                selection-background-color: {tree_selection_bg};
+                color: {tree_selection_text};
+                selection-color: {tree_selection_text};
+            }}
+            QTabWidget#rightPanelTabs QTreeWidget::item:selected:focus {{
+                background-color: {tree_focus_selection_bg};
+                selection-background-color: {tree_focus_selection_bg};
+                color: {tree_focus_selection_text};
+                selection-color: {tree_focus_selection_text};
+            }}
+            QTabWidget#rightPanelTabs QTreeWidget QHeaderView::section {{
+                color: {tree_muted_text};
+                background-color: {tree_header_bg};
+                border: 0px;
+                border-bottom: 1px solid {tree_border};
+                padding: 6px 8px;
+            }}
+            QTabWidget#rightPanelTabs QTreeWidget QComboBox {{
+                background-color: transparent;
+                color: {tree_text};
+                border: 0px;
+                border-bottom: 1px solid {accent};
+                min-height: 24px;
+                padding-left: 6px;
+            }}
+            QTabWidget#rightPanelTabs QTreeWidget QComboBox:hover,
+            QTabWidget#rightPanelTabs QTreeWidget QComboBox:focus {{
+                background-color: {tree_widget_hover_bg};
+                border-bottom: 1px solid {accent};
+            }}
+            QTabWidget#rightPanelTabs QTreeWidget QToolButton {{
+                color: {tree_text};
+                background-color: transparent;
+                border: 0px;
+                padding: 0px;
+                margin: 0px;
+            }}
+            QTabWidget#rightPanelTabs QTreeWidget QToolButton:hover {{
+                background-color: {tree_widget_hover_bg};
+            }}
+            """
+        )
 
     # ---------- 신호 처리 ----------
 

@@ -60,6 +60,7 @@ _configure_qt_environment()
 
 from PyQt5.QtWidgets import QApplication
 
+from core.common.theme import apply_saved_theme
 from main_window import MainWindow
 
 # cv2를 불러오며 Qt 환경 변수가 바뀔 수 있는 모듈 임포트 뒤에 다시 적용한다.
@@ -68,6 +69,7 @@ _configure_qt_environment()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    apply_saved_theme(app)
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())
