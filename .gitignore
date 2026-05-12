@@ -32,14 +32,18 @@ export/
 export_*/
 
 # Large model weights / checkpoints
-weights/
-checkpoints/
+weights/*
+!weights/.gitkeep
 
-*weight*/
-*weights*/
-*checkpoint*/
-*checkpoints*/
+checkpoints/*
+!checkpoints/.gitkeep
 
+*weight*/*
+*weights*/*
+*checkpoint*/*
+*checkpoints*/*
+
+# Model files
 *.pt
 *.pth
 *.onnx
