@@ -43,11 +43,7 @@ class MouseEventControllerMixin:
         return
 
     def mouseDoubleClickEvent(self, event):
-        """왼쪽 더블클릭 시 이미지를 화면에 다시 맞춘다."""
-        if event.button() == Qt.LeftButton:
-            self.fit_to_image()
-            event.accept()
-            return
+        """더블클릭은 기본 그래픽 뷰 동작에 맡긴다."""
         super().mouseDoubleClickEvent(event)
 
     # ---------- 모양 계산 ----------

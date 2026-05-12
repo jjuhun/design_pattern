@@ -41,18 +41,21 @@ class ShapeAnnotationControllerMixin:
         self.box_button = QToolButton()
         self.box_button.setText("Box")
         self._setup_shape_tool_button(self.box_button)
+        self.box_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.box_button.clicked.connect(lambda checked: self.on_shape_tool_clicked("box", checked))
         layout.addWidget(self.box_button)
 
         self.polygon_button = QToolButton()
         self.polygon_button.setText("Polygon")
         self._setup_shape_tool_button(self.polygon_button)
+        self.polygon_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.polygon_button.clicked.connect(lambda checked: self.on_shape_tool_clicked("polygon", checked))
         layout.addWidget(self.polygon_button)
 
         self.keypoint_button = QToolButton()
         self.keypoint_button.setText("Keypoint")
         self._setup_shape_tool_button(self.keypoint_button)
+        self.keypoint_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.keypoint_button.clicked.connect(lambda checked: self.on_shape_tool_clicked("keypoint", checked))
         layout.addWidget(self.keypoint_button)
 

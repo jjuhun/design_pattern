@@ -6,18 +6,23 @@ from PyQt5.QtCore import QThread, Qt, QTimer
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QMessageBox,
+    QAbstractSpinBox,
     QApplication,
     QActionGroup,
     QAction,
     QAbstractItemView,
+    QComboBox,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMainWindow,
     QMenu,
+    QPlainTextEdit,
     QShortcut,
     QSlider,
     QSpinBox,
     QTabWidget,
+    QTextEdit,
     QTreeWidget,
     QHeaderView,
 )
@@ -141,6 +146,7 @@ class MainWindow(
 
         self.frame_slider = QSlider(Qt.Horizontal)
         self.frame_slider.setObjectName("frameSlider")
+        self.frame_slider.setFocusPolicy(Qt.NoFocus) # 슬라이더가 키보드 포커스를 받지 않아서 방향키로 프레임 이동 불가
         self.frame_slider.setEnabled(False)
         self.frame_slider.valueChanged.connect(self.go_to_frame)
 
@@ -261,6 +267,30 @@ class MainWindow(
         QShortcut(QKeySequence.Undo, self, activated=self.undo_last_action)
         QShortcut(QKeySequence("Ctrl+Y"), self, activated=self.redo_last_action)
         QShortcut(QKeySequence("Ctrl+Shift+Z"), self, activated=self.redo_last_action)
+        QShortcut(QKeySequence("A"), self, activated=self.shortcut_prev_frame)
+        QShortcut(QKeySequence("D"), self, activated=self.shortcut_next_frame)
+        QShortcut(QKeySequence("Ctrl+S"), self, activated=self.run_auto_save)
+        QShortcut(QKeySequence("Ctrl+0"), self, activated=self.canvas.fit_to_image)
+
+    def _text_input_has_focus(self):
+        """텍스트/값 입력 중에는 단일 문자 단축키가 입력을 가로채지 않게 한다."""
+        focused = self.focusWidget()
+        return isinstance(
+            focused,
+            (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox),
+        )
+
+    def shortcut_prev_frame(self):
+        """A 단축키로 이전 프레임으로 이동한다."""
+        if self._text_input_has_focus():
+            return
+        self.prev_frame()
+
+    def shortcut_next_frame(self):
+        """D 단축키로 다음 프레임으로 이동한다."""
+        if self._text_input_has_focus():
+            return
+        self.next_frame()
 
     def connect_canvas_signals(self):
         """작업 화면에서 발생하는 신호를 메인 창 동작에 연결한다."""
@@ -285,7 +315,7 @@ class MainWindow(
         """창이 닫힐 때 재생과 열린 프레임 소스를 정리한다."""
         if not self.confirm_before_context_switch("프로그램 종료"):
             event.ignore()
-            return        
+            return
         if self.timer.isActive():
             self.timer.stop()
         self.close_current_source()
