@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import QApplication, QHBoxLayout, QMessageBox, QPushButton,
 
 from core.common.native_dialogs import get_existing_directory, get_open_file_name
 from core.common.utils import clamp
-from features.frame_panel.sources import CachedFrameSource, FrameSourceBase, ImageFolderSource
+from features.frame_panel.frame_panel_sources import CachedFrameSource, FrameSourceBase, ImageFolderSource
 
 
 class FramePanelControllerMixin:

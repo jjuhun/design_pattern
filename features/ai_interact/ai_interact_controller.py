@@ -265,7 +265,12 @@ class AIInteractControllerMixin:
         try:
             import cv2
             import numpy as np
-            from features.ai_interact.engine import SAMImageInteractEngine
+
+            if self.ai_pending_model_type == "sam3":
+                from features.ai_interact.ai_interact_engine_sam3 import SAM3ImageInteractEngine
+            else:
+                from features.ai_interact.ai_interact_engine import SAMImageInteractEngine
+
         except ImportError as ex:
             self._reset_ai_interact_prompt_state()
             QMessageBox.critical(self, "오류", f"필요한 라이브러리를 불러올 수 없습니다:\n{str(ex)}")
@@ -287,43 +292,58 @@ class AIInteractControllerMixin:
         display_model = self.ai_pending_model_type.replace("_", " ").upper()
         self.show_status_message(f"{display_model} 단일 프레임 interact 실행 중...")
         QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            engine = SAMImageInteractEngine(
-                model_type=self.ai_pending_model_type,
-                device="cuda",
-                polygon_simplification=self._ai_interact_polygon_simplification_value(),
-            )
-            # 박스로 시작한 보정 단계에서는 박스와 점을 함께 사용해 범위 보정을 반영한다.
-            if prompt_box is not None and prompt_points is not None and prompt_labels is not None:
-                mask = engine.segment_with_box_and_points(frame, prompt_box, prompt_points, prompt_labels)
-            elif prompt_points is not None and prompt_labels is not None:
-                mask = engine.segment_with_points(frame, prompt_points, prompt_labels)
-            elif prompt_box is not None:
-                mask = engine.segment_with_box(frame, prompt_box)
-            else:
-                raise RuntimeError("프롬프트가 없어 SAM interact를 실행할 수 없습니다.")
 
-            result_shape_type = "polygon"
+        try:
+            if self.ai_pending_model_type == "sam3":
+                engine = SAM3ImageInteractEngine(
+                    model_path="weights/sam3/sam3.pt",
+                    device="cuda",
+                    polygon_simplification=self._ai_interact_polygon_simplification_value(),
+                )
+
+                text_prompt = ""
+                if getattr(self, "ai_text_prompt_input", None) is not None:
+                    text_prompt = self.ai_text_prompt_input.text().strip()
+
+                # SAM3는 text prompt가 있으면 우선 사용
+                if text_prompt:
+                    mask = engine.segment_with_text(frame, text_prompt)
+                elif prompt_box is not None and prompt_points is not None and prompt_labels is not None:
+                    mask = engine.segment_with_box_and_points(frame, prompt_box, prompt_points, prompt_labels)
+                elif prompt_box is not None:
+                    mask = engine.segment_with_box(frame, prompt_box)
+                elif prompt_points is not None and prompt_labels is not None:
+                    mask = engine.segment_with_points(frame, prompt_points, prompt_labels)
+                else:
+                    raise RuntimeError("SAM3 프롬프트가 없습니다.")
+
+            else:
+                engine = SAMImageInteractEngine(
+                    model_type=self.ai_pending_model_type,
+                    device="cuda",
+                    polygon_simplification=self._ai_interact_polygon_simplification_value(),
+                )
+
+                if prompt_box is not None and prompt_points is not None and prompt_labels is not None:
+                    mask = engine.segment_with_box_and_points(frame, prompt_box, prompt_points, prompt_labels)
+                elif prompt_points is not None and prompt_labels is not None:
+                    mask = engine.segment_with_points(frame, prompt_points, prompt_labels)
+                elif prompt_box is not None:
+                    mask = engine.segment_with_box(frame, prompt_box)
+                else:
+                    raise RuntimeError("프롬프트가 없어 SAM interact를 실행할 수 없습니다.")
+
+            if mask is None:
+                raise RuntimeError("SAM 결과 mask가 비어 있습니다.")
+
             result_data = engine.mask_to_polygon(mask)
+
         except Exception as e:
             err_text = str(e)
-            if self.ai_pending_model_type == "sam3" and (
-                "SAM3 predictor" in err_text
-                or "SAM checkpoint 파일을 찾을 수 없습니다." in err_text
-                or "SAM2 config 파일을 찾을 수 없습니다." in err_text
-            ):
-                # SAM3 지원이나 체크포인트가 없는 환경에서는 SAM2로 자연스럽게 전환한다.
-                self.ai_pending_model_type = "sam2_tiny"
-                self.show_status_message("SAM3를 사용할 수 없어 SAM2.1 Tiny로 자동 전환합니다.")
-                self._execute_ai_single_frame_interact(
-                    prompt_points=prompt_points,
-                    prompt_labels=prompt_labels,
-                    prompt_box=prompt_box,
-                )
-                return
             self._reset_ai_interact_prompt_state()
             QMessageBox.critical(self, "오류", f"SAM interact 중 오류가 발생했습니다:\n{err_text}")
             return
+
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -331,7 +351,7 @@ class AIInteractControllerMixin:
         if len(points) < 3:
             if prompt_box is not None:
                 points = box_to_polygon(prompt_box)
-                mask = None  # SAM 마스크가 없으므로 박스를 대신 사용한다.
+                mask = None
             else:
                 self._reset_ai_interact_prompt_state()
                 QMessageBox.warning(self, "오류", "유효한 polygon 결과를 얻지 못했습니다.")
@@ -341,9 +361,16 @@ class AIInteractControllerMixin:
         self.ai_pending_polygon = points
         self.ai_prompt_mode = "refine"
         self.canvas.set_mode("ai_refine")
+
         if self.canvas is not None:
-            self.canvas.show_ai_interact_preview(points, list(zip(self.ai_refinement_points, self.ai_refinement_labels)))
-        self.show_status_message("AI Interact: 좌클릭으로 추가, 우클릭으로 제거하세요. 완료하려면 Interact 버튼을 다시 누르세요.")
+            self.canvas.show_ai_interact_preview(
+                points,
+                list(zip(self.ai_refinement_points, self.ai_refinement_labels)),
+            )
+
+        self.show_status_message(
+            "AI Interact: 좌클릭으로 추가, 우클릭으로 제거하세요. 완료하려면 Interact 버튼을 다시 누르세요."
+        )
 
     def _ai_interact_polygon_simplification_value(self) -> float:
         """AI Interact UI에서 선택한 polygon 단순화 강도를 읽는다."""

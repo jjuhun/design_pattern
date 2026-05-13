@@ -30,16 +30,16 @@ from PyQt5.QtWidgets import (
 from canvas import AnnotationCanvas
 from core.annotation.models import AnnotationStore, ClipboardAnnotation, LabelDef
 from core.common.theme import apply_theme, load_theme_key, theme_options
-from features.ai_interact.controller import AIInteractControllerMixin
-from features.ai_tracking.controller import AITrackingControllerMixin, TrackingWorker
+from features.ai_interact.ai_interact_controller import AIInteractControllerMixin
+from features.ai_tracking.ai_tracking_controller import AITrackingControllerMixin, TrackingWorker
 # 여기서부터 수정하고: 연속 복붙 기능 mixin import를 추가했다.
-from features.copy_sequence.controller import CopySequenceControllerMixin
+from features.copy_sequence.copy_sequence_controller import CopySequenceControllerMixin
 # 여기까지 수정했다: 연속 복붙 기능 mixin import를 추가했다.
-from features.frame_panel.controller import FramePanelControllerMixin
-from features.frame_panel.sources import FrameSourceBase
-from features.right_panel.controller import RightPanelControllerMixin
-from features.shape_annotation.controller import ShapeAnnotationControllerMixin
-from features.top_panel.controller import TopPanelControllerMixin
+from features.frame_panel.frame_panel_controller import FramePanelControllerMixin
+from features.frame_panel.frame_panel_sources import FrameSourceBase
+from features.right_panel.right_panel_controller import RightPanelControllerMixin
+from features.shape_annotation.shape_annotation_controller import ShapeAnnotationControllerMixin
+from features.top_panel.top_panel_controller import TopPanelControllerMixin
 
 
 class MainWindow(

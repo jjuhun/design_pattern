@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import QDialog, QMessageBox
 
 from core.annotation.models import Annotation
 from core.common.utils import clamp, natural_key
-from features.ai_tracking.dialogs import SelectSAMModelDialog, TrackingRangeDialog
+from features.ai_tracking.ai_tracking_dialogs import SelectSAMModelDialog, TrackingRangeDialog
 
 
 class TrackingWorker(QObject):
@@ -60,8 +60,7 @@ class TrackingWorker(QObject):
     @classmethod
     def chunk_size_for_model(cls, model_type: str) -> int:
         """메모리 사용량이 큰 모델일수록 더 작은 트랙킹 청크를 사용한다."""
-        return cls.LARGE_CHUNK_SIZE if model_type == "sam2_large" else cls.DEFAULT_CHUNK_SIZE
-
+        return cls.LARGE_CHUNK_SIZE if model_type in ("sam2_large", "sam3") else cls.DEFAULT_CHUNK_SIZE
     def stop(self):
         """작업 루프가 안전하게 멈추도록 중지 요청 상태를 켠다."""
         self._stop_requested = True
@@ -248,7 +247,10 @@ class TrackingWorker(QObject):
         stopped = False
         try:
             import numpy as np
-            from features.ai_tracking.engine import SAM2TrackingEngine
+            if self.model_type == "sam3":
+                from features.ai_tracking.ai_tracking_engine_sam3 import SAM3TrackingEngine
+            else:
+                from features.ai_tracking.ai_tracking_engine import SAM2TrackingEngine
 
             if self._stop_requested:
                 self.finished.emit(
@@ -283,11 +285,18 @@ class TrackingWorker(QObject):
                     frame_indices = list(range(chunk_start, chunk_end - 1, -1))
 
                 if self.engine is None:
-                    self.engine = SAM2TrackingEngine(
-                        model_type=self.model_type,
-                        device=self.device,
-                        polygon_simplification=self.polygon_simplification,
-                    )
+                    if self.model_type == "sam3":
+                        self.engine = SAM3TrackingEngine(
+                            device=self.device,
+                            polygon_simplification=self.polygon_simplification,
+                        )
+                    else:
+                        self.engine = SAM2TrackingEngine(
+                            model_type=self.model_type,
+                            device=self.device,
+                            polygon_simplification=self.polygon_simplification,
+                        )
+
                 loaded_input, subset_end_frame, original_frame_indices = self._load_frames_from_media_input(frame_indices)
                 self.engine.initialize_tracking(
                     loaded_input,

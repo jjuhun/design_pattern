@@ -16,8 +16,8 @@ from PyQt5.QtWidgets import (
 )
 
 from core.annotation.models import RenderAnnotation
-from features.mouse_event.controller import MouseEventControllerMixin
-from features.shape_annotation.controller import ShapeCanvasMixin
+from features.mouse_event.mouse_event_controller import MouseEventControllerMixin
+from features.shape_annotation.shape_annotation_controller import ShapeCanvasMixin
 
 
 Point = Tuple[float, float]
