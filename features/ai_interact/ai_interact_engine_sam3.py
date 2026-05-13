@@ -1,437 +1,305 @@
-# features/ai_interact/ai_interact_engine_sam3.py
+# SAM3 단일 프레임 상호작용 엔진입니다.
+# HuggingFace Transformers 기반으로 SAM3를 로드하며, weights/*.pt 파일을 요구하지 않습니다.
 
-from pathlib import Path
+from __future__ import annotations
 
-import cv2
+import sys
+from typing import List, Optional, Tuple
+
 import numpy as np
-import torch
-from PIL import Image
 
-from sam3.model_builder import build_sam3_image_model
-from sam3.model.sam3_image_processor import Sam3Processor
+Point = Tuple[float, float]
+BoxData = Tuple[float, float, float, float]
+PolygonData = List[Point]
 
 
 class SAM3ImageInteractEngine:
     """
-    Meta SAM3 Image Interact Engine
+    HuggingFace Transformers 기반 SAM3 이미지 분할 엔진.
 
-    동작 기준:
-    1. text 없음 + point/box 있음
-       -> point/box visual prompt 기준 segmentation
-
-    2. text 있음 + point/box 있음
-       -> point/box 결과 + text 결과를 함께 사용
-
-    3. text만 있음
-       -> text prompt만으로 segmentation
-
-    주의:
-    - Meta SAM3의 point/box API 함수명은 설치된 sam3 버전에 따라 다를 수 있음.
-    - text prompt는 공식 예시 기준 set_text_prompt() 사용.
+    - 최초 실행 시 HuggingFace cache로 모델을 다운로드한다.
+    - 이후에는 ~/.cache/huggingface/hub 캐시를 재사용한다.
+    - 프로젝트 weights/sam3_*.pt 파일은 사용하지 않는다.
     """
 
-    def __init__(
-        self,
-        model_path=None,
-        device="cuda",
-        polygon_simplification=0.005,
-    ):
-        self.model_path = str(model_path) if model_path is not None else None
-        self.device = device if device == "cuda" and torch.cuda.is_available() else "cpu"
-        self.polygon_simplification = float(polygon_simplification)
+    MODEL_ID_CANDIDATES = (
+        "facebook/sam3-hiera-large",
+        "facebook/sam3",
+    )
 
-        self.model = self._build_model()
-        if hasattr(self.model, "to"):
-            self.model.to(self.device)
-        if hasattr(self.model, "eval"):
-            self.model.eval()
+    _model = None
+    _processor = None
+    _model_id = None
 
-        self.processor = Sam3Processor(self.model)
-        self.state = None
-        self.current_image = None
+    def __init__(self, device: str = "cuda", polygon_simplification: float = 0.005):
+        if device != "cuda":
+            raise ValueError("SAM3 interact is configured as GPU-only. Use device='cuda'.")
+        self.device = device
+        self.polygon_simplification = max(0.0, float(polygon_simplification))
 
-    def _build_model(self):
-        """
-        Meta SAM3 모델 생성.
+    def _validate_device(self):
+        try:
+            import torch
+        except ImportError as exc:
+            raise RuntimeError("SAM3 실행에는 torch가 필요합니다.") from exc
 
-        build_sam3_image_model()이 checkpoint/model_path 인자를 받는 버전이면 사용하고,
-        아니면 기본 호출로 fallback한다.
-        """
-        if self.model_path and Path(self.model_path).exists():
-            for kwargs in (
-                {"checkpoint_path": self.model_path},
-                {"checkpoint": self.model_path},
-                {"model_path": self.model_path},
-            ):
-                try:
-                    return build_sam3_image_model(**kwargs)
-                except TypeError:
-                    continue
-
-        return build_sam3_image_model()
-
-    def set_image(self, image):
-        """
-        image:
-            - numpy.ndarray
-            - PIL.Image
-            - image path str
-        """
-        pil_image = self._to_pil_image(image)
-        self.current_image = pil_image
-        self.state = self.processor.set_image(pil_image)
-        return self.state
-
-    def predict(
-        self,
-        image=None,
-        points=None,
-        labels=None,
-        box=None,
-        text_prompt=None,
-    ):
-        """
-        통합 SAM3 실행 함수.
-
-        points:
-            [x, y] 또는 [[x, y], [x, y]]
-
-        labels:
-            [1] 또는 [1, 0]
-            1 = positive, 0 = negative
-
-        box:
-            [x1, y1, x2, y2]
-
-        text_prompt:
-            "person", "car", "person with red cloth" 등
-        """
-        if image is not None:
-            self.set_image(image)
-
-        if self.state is None:
-            raise RuntimeError("SAM3 image state is empty. set_image() 또는 image 입력이 필요합니다.")
-
-        has_points = points is not None and len(np.asarray(points).reshape(-1)) >= 2
-        has_box = box is not None
-        has_text = text_prompt is not None and str(text_prompt).strip() != ""
-
-        if not has_points and not has_box and not has_text:
-            raise RuntimeError("SAM3 프롬프트가 없습니다. point, box, text 중 하나는 필요합니다.")
-
-        outputs = []
-
-        # 1. point/box visual prompt
-        if has_points or has_box:
-            visual_output = self._predict_visual_prompt(
-                points=points if has_points else None,
-                labels=labels,
-                box=box if has_box else None,
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "현재 CUDA GPU를 사용할 수 없습니다.\n"
+                f"현재 실행 중인 Python: {sys.executable}\n"
+                "nvidia-smi, NVIDIA 드라이버, PyTorch CUDA 설치 상태를 확인하세요."
             )
-            if visual_output is not None:
-                outputs.append(visual_output)
+        return torch
 
-        # 2. text prompt
-        if has_text:
-            text_output = self._predict_text_prompt(str(text_prompt).strip())
-            if text_output is not None:
-                outputs.append(text_output)
+    def load_model(self):
+        """SAM3 모델과 processor를 최초 1회만 로드한다."""
+        if self.__class__._model is not None and self.__class__._processor is not None:
+            return
 
-        merged = self._merge_outputs(outputs)
+        torch = self._validate_device()
+        try:
+            from transformers import Sam3Model, Sam3Processor
+        except Exception as exc:
+            raise ImportError(
+                "SAM3 HuggingFace 실행에 필요한 transformers를 불러올 수 없습니다.\n"
+                "pip install -U transformers huggingface_hub accelerate safetensors"
+            ) from exc
 
-        if merged is None or merged.get("masks") is None:
-            return None
-
-        return self._select_best_mask(merged)
-
-    def segment_with_points(self, image, points, labels):
-        return self.predict(
-            image=image,
-            points=points,
-            labels=labels,
-            box=None,
-            text_prompt=None,
-        )
-
-    def segment_with_box(self, image, box):
-        return self.predict(
-            image=image,
-            points=None,
-            labels=None,
-            box=box,
-            text_prompt=None,
-        )
-
-    def segment_with_box_and_points(self, image, box, points, labels):
-        return self.predict(
-            image=image,
-            points=points,
-            labels=labels,
-            box=box,
-            text_prompt=None,
-        )
-
-    def segment_with_text(self, image, text_prompt):
-        return self.predict(
-            image=image,
-            points=None,
-            labels=None,
-            box=None,
-            text_prompt=text_prompt,
-        )
-
-    def segment_with_prompts(self, image, points=None, labels=None, box=None, text_prompt=None):
-        return self.predict(
-            image=image,
-            points=points,
-            labels=labels,
-            box=box,
-            text_prompt=text_prompt,
-        )
-
-    def _predict_text_prompt(self, text_prompt):
-        """Meta SAM3 공식 예시 기준 text prompt."""
-        output = self.processor.set_text_prompt(
-            state=self.state,
-            prompt=text_prompt,
-        )
-        return self._normalize_output(output)
-
-    def _predict_visual_prompt(self, points=None, labels=None, box=None):
-        """
-        point/box visual prompt.
-
-        Meta SAM3 설치 버전에 따라 함수명이 다를 수 있어 후보 메서드를 순서대로 탐색한다.
-        실제 repo에서 함수명이 확인되면 이 부분을 고정 함수명으로 바꾸면 된다.
-        """
-        norm_points = None
-        norm_labels = None
-        norm_box = None
-
-        if points is not None:
-            norm_points = self._normalize_points(points)
-            if labels is None:
-                norm_labels = np.ones((len(norm_points),), dtype=np.int32)
-            else:
-                norm_labels = np.asarray(labels, dtype=np.int32).reshape(-1)
-
-            if len(norm_labels) != len(norm_points):
-                raise ValueError("points 개수와 labels 개수가 다릅니다.")
-
-        if box is not None:
-            norm_box = self._normalize_box(box)
-
-        candidate_calls = []
-
-        # 통합 visual prompt 계열
-        candidate_calls.append(("set_visual_prompt", dict(points=norm_points, labels=norm_labels, box=norm_box)))
-        candidate_calls.append(("set_visual_prompt", dict(points=norm_points, labels=norm_labels, boxes=norm_box)))
-
-        # point + box 통합 계열
-        candidate_calls.append(("set_point_box_prompt", dict(points=norm_points, labels=norm_labels, box=norm_box)))
-        candidate_calls.append(("set_points_box_prompt", dict(points=norm_points, labels=norm_labels, boxes=norm_box)))
-
-        # box만
-        if norm_box is not None and norm_points is None:
-            candidate_calls.append(("set_box_prompt", dict(box=norm_box)))
-            candidate_calls.append(("set_box_prompt", dict(boxes=norm_box)))
-            candidate_calls.append(("set_boxes_prompt", dict(boxes=norm_box)))
-
-        # point만
-        if norm_points is not None and norm_box is None:
-            candidate_calls.append(("set_point_prompt", dict(points=norm_points, labels=norm_labels)))
-            candidate_calls.append(("set_points_prompt", dict(points=norm_points, labels=norm_labels)))
-
-        last_error = None
-
-        for method_name, kwargs in candidate_calls:
-            if not hasattr(self.processor, method_name):
-                continue
-
-            method = getattr(self.processor, method_name)
-            clean_kwargs = {key: value for key, value in kwargs.items() if value is not None}
-
+        last_exc = None
+        for model_id in self.MODEL_ID_CANDIDATES:
             try:
-                output = method(state=self.state, **clean_kwargs)
-                return self._normalize_output(output)
-            except TypeError as ex:
-                last_error = ex
+                processor = Sam3Processor.from_pretrained(model_id)
+                model = Sam3Model.from_pretrained(model_id)
+                model.to(self.device)
+                model.eval()
+                self.__class__._processor = processor
+                self.__class__._model = model
+                self.__class__._model_id = model_id
+                return
+            except Exception as exc:
+                last_exc = exc
                 continue
 
-        raise NotImplementedError(
-            "현재 설치된 Meta SAM3 Processor에서 point/box visual prompt API를 찾지 못했습니다.\n"
-            "아래 명령으로 실제 함수명을 확인하세요:\n"
-            "grep -R \"def set_.*point\" sam3/\n"
-            "grep -R \"def set_.*box\" sam3/\n"
-            "grep -R \"def set_.*visual\" sam3/\n"
-            f"마지막 오류: {last_error}"
+        raise RuntimeError(
+            "SAM3 모델을 HuggingFace에서 불러오지 못했습니다.\n"
+            "확인 항목:\n"
+            "1) pip install -U transformers huggingface_hub accelerate safetensors\n"
+            "2) hf auth login --force\n"
+            "3) facebook/sam3 또는 facebook/sam3-hiera-large 접근 승인\n"
+            "4) 최초 실행 시 인터넷 연결\n"
+            f"마지막 오류: {last_exc}"
         )
 
-    def _normalize_output(self, output):
-        """
-        Meta SAM3 output을 dict 형태로 정리.
-        예상 기본 형태:
-            output['masks']
-            output['boxes']
-            output['scores']
-        """
-        if output is None:
-            return None
+    @property
+    def model(self):
+        self.load_model()
+        return self.__class__._model
 
-        if isinstance(output, dict):
-            return {
-                "masks": self._to_numpy(output.get("masks")),
-                "boxes": self._to_numpy(output.get("boxes")),
-                "scores": self._to_numpy(output.get("scores")),
-            }
+    @property
+    def processor(self):
+        self.load_model()
+        return self.__class__._processor
 
-        raise TypeError(f"지원하지 않는 SAM3 output 형식입니다: {type(output)}")
+    def _post_process(self, outputs, inputs, target_size: Tuple[int, int]):
+        """Transformers processor의 SAM3 instance segmentation 결과를 표준 형태로 정리한다."""
+        processor = self.processor
+        h, w = target_size
 
-    def _merge_outputs(self, outputs):
-        outputs = [out for out in outputs if out is not None]
+        # Transformers 버전별 인자명이 달라질 수 있어 순차적으로 시도한다.
+        attempts = [
+            lambda: processor.post_process_instance_segmentation(
+                outputs,
+                threshold=0.5,
+                mask_threshold=0.5,
+                target_sizes=[(h, w)],
+            ),
+            lambda: processor.post_process_instance_segmentation(
+                outputs,
+                target_sizes=[(h, w)],
+            ),
+            lambda: processor.post_process_instance_segmentation(
+                outputs,
+                original_sizes=[(h, w)],
+                reshaped_input_sizes=inputs.get("reshaped_input_sizes"),
+            ),
+        ]
+        last_exc = None
+        for fn in attempts:
+            try:
+                return fn()
+            except Exception as exc:
+                last_exc = exc
+                continue
+        raise RuntimeError(f"SAM3 post-process 실패: {last_exc}")
 
-        if not outputs:
-            return None
+    def _extract_masks_scores(self, results) -> Tuple[np.ndarray, np.ndarray]:
+        if results is None:
+            return np.zeros((0, 1, 1), dtype=np.uint8), np.zeros((0,), dtype=np.float32)
+        if isinstance(results, (list, tuple)):
+            result = results[0] if results else {}
+        else:
+            result = results
 
-        if len(outputs) == 1:
-            return outputs[0]
-
-        merged = {
-            "masks": None,
-            "boxes": None,
-            "scores": None,
-        }
-
-        for key in merged.keys():
-            values = []
-            for out in outputs:
-                value = out.get(key)
-                if value is not None:
-                    values.append(value)
-
-            if values:
-                try:
-                    merged[key] = np.concatenate(values, axis=0)
-                except Exception:
-                    merged[key] = values[0]
-
-        return merged
-
-    def _select_best_mask(self, output):
-        """
-        controller는 mask 하나를 받아 mask_to_polygon()으로 넘기는 구조이므로
-        여러 mask 중 score가 가장 높은 mask 하나를 반환한다.
-        """
-        masks = output.get("masks")
-        scores = output.get("scores")
+        masks = result.get("masks") if isinstance(result, dict) else getattr(result, "masks", None)
+        scores = None
+        for key in ("scores", "score", "pred_scores"):
+            if isinstance(result, dict) and key in result:
+                scores = result[key]
+                break
+            if hasattr(result, key):
+                scores = getattr(result, key)
+                break
 
         if masks is None:
-            return None
+            return np.zeros((0, 1, 1), dtype=np.uint8), np.zeros((0,), dtype=np.float32)
 
-        masks = np.asarray(masks)
+        if hasattr(masks, "detach"):
+            masks_np = masks.detach().cpu().numpy()
+        else:
+            masks_np = np.asarray(masks)
+        masks_np = np.squeeze(masks_np)
+        if masks_np.ndim == 2:
+            masks_np = masks_np[None, :, :]
+        if masks_np.ndim != 3:
+            return np.zeros((0, 1, 1), dtype=np.uint8), np.zeros((0,), dtype=np.float32)
+        masks_np = (masks_np > 0).astype(np.uint8)
 
-        if masks.ndim == 2:
-            return masks.astype(bool)
+        if scores is None:
+            scores_np = masks_np.reshape(masks_np.shape[0], -1).sum(axis=1).astype(np.float32)
+        elif hasattr(scores, "detach"):
+            scores_np = scores.detach().cpu().numpy().reshape(-1).astype(np.float32)
+        else:
+            scores_np = np.asarray(scores).reshape(-1).astype(np.float32)
+        if scores_np.size != masks_np.shape[0]:
+            scores_np = masks_np.reshape(masks_np.shape[0], -1).sum(axis=1).astype(np.float32)
+        return masks_np, scores_np
 
-        if masks.ndim == 3:
-            if scores is not None:
-                scores = np.asarray(scores).reshape(-1)
-                if len(scores) == masks.shape[0]:
-                    best_idx = int(np.argmax(scores))
-                    return masks[best_idx].astype(bool)
+    def _run_sam3(self, frame_rgb: np.ndarray, text_prompt: str = "", box_xyxy: Optional[BoxData] = None):
+        import torch
+        from PIL import Image
 
-            return masks[0].astype(bool)
+        h, w = frame_rgb.shape[:2]
+        image = Image.fromarray(np.asarray(frame_rgb, dtype=np.uint8), mode="RGB")
+        text_prompt = str(text_prompt or "").strip()
 
-        if masks.ndim == 4:
-            # [N, 1, H, W] 또는 [1, N, H, W] 형태 대응
-            masks = np.squeeze(masks)
-            if masks.ndim == 2:
-                return masks.astype(bool)
-            if masks.ndim == 3:
-                if scores is not None:
-                    scores = np.asarray(scores).reshape(-1)
-                    if len(scores) == masks.shape[0]:
-                        return masks[int(np.argmax(scores))].astype(bool)
-                return masks[0].astype(bool)
+        kwargs = {"images": image, "return_tensors": "pt"}
+        if text_prompt:
+            kwargs["text"] = text_prompt
+        if box_xyxy is not None:
+            x1, y1, x2, y2 = box_xyxy
+            # processor 버전에 따라 input_boxes를 지원하지 않을 수 있다.
+            kwargs["input_boxes"] = [[[float(x1), float(y1), float(x2), float(y2)]]]
 
-        return None
+        try:
+            inputs = self.processor(**kwargs)
+        except TypeError:
+            # input_boxes 미지원 버전이면 text-only로 후보를 만들고 후단에서 box와 겹치는 마스크를 고른다.
+            kwargs.pop("input_boxes", None)
+            inputs = self.processor(**kwargs)
 
-    def mask_to_polygon(self, mask):
-        """binary mask -> polygon points"""
-        if mask is None:
-            return []
+        inputs = {k: (v.to(self.device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+        with torch.inference_mode():
+            try:
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                    outputs = self.model(**inputs)
+            except Exception:
+                outputs = self.model(**inputs)
 
-        mask = np.asarray(mask)
+        results = self._post_process(outputs, inputs, (h, w))
+        return self._extract_masks_scores(results)
 
-        if mask.dtype != np.uint8:
-            mask = mask.astype(np.uint8)
+    def _select_best_mask(
+        self,
+        masks: np.ndarray,
+        scores: np.ndarray,
+        box_xyxy: Optional[BoxData] = None,
+        points: Optional[np.ndarray] = None,
+        labels: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        if masks.shape[0] == 0:
+            raise RuntimeError("SAM3가 유효한 마스크를 반환하지 않았습니다. text prompt, bbox, 이미지 색상 변환을 확인하세요.")
 
-        if mask.max() <= 1:
-            mask = mask * 255
+        rank = scores.astype(np.float64).copy()
 
-        contours, _ = cv2.findContours(
-            mask,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE,
-        )
+        if box_xyxy is not None:
+            x1, y1, x2, y2 = [int(round(v)) for v in box_xyxy]
+            h, w = masks.shape[1:]
+            x1, x2 = max(0, min(x1, w - 1)), max(0, min(x2, w))
+            y1, y2 = max(0, min(y1, h - 1)), max(0, min(y2, h))
+            box_area = max(1, (x2 - x1) * (y2 - y1))
+            overlaps = []
+            for mask in masks:
+                inter = int(mask[y1:y2, x1:x2].sum())
+                area = max(1, int(mask.sum()))
+                overlaps.append((inter / box_area) + (inter / area))
+            rank += np.asarray(overlaps, dtype=np.float64) * 10.0
 
+        if points is not None and labels is not None:
+            pts = np.asarray(points, dtype=np.float32)
+            lbs = np.asarray(labels, dtype=np.int32).reshape(-1)
+            h, w = masks.shape[1:]
+            point_scores = np.zeros((masks.shape[0],), dtype=np.float64)
+            for px_py, label in zip(pts, lbs):
+                px = max(0, min(int(round(float(px_py[0]))), w - 1))
+                py = max(0, min(int(round(float(px_py[1]))), h - 1))
+                inside = masks[:, py, px] > 0
+                point_scores += np.where(inside, 5.0 if int(label) == 1 else -5.0, -2.0 if int(label) == 1 else 2.0)
+            rank += point_scores
+
+        best_idx = int(np.argmax(rank))
+        mask = masks[best_idx].astype(np.uint8)
+        if int(mask.sum()) == 0:
+            raise RuntimeError("SAM3가 빈 마스크를 반환했습니다.")
+        return mask
+
+    def segment_with_text(self, frame_rgb: np.ndarray, text_prompt: str) -> np.ndarray:
+        masks, scores = self._run_sam3(frame_rgb, text_prompt=text_prompt)
+        return self._select_best_mask(masks, scores)
+
+    def segment_with_text_and_box(self, frame_rgb: np.ndarray, text_prompt: str, box_xyxy: BoxData) -> np.ndarray:
+        masks, scores = self._run_sam3(frame_rgb, text_prompt=text_prompt, box_xyxy=box_xyxy)
+        return self._select_best_mask(masks, scores, box_xyxy=box_xyxy)
+
+    def segment_with_text_and_points(self, frame_rgb: np.ndarray, text_prompt: str, points: np.ndarray, labels: np.ndarray) -> np.ndarray:
+        if not text_prompt:
+            raise RuntimeError("SAM3 point-only는 현재 HuggingFace image engine에서 직접 지원하지 않습니다. text prompt를 함께 입력하거나 SAM2를 사용하세요.")
+        masks, scores = self._run_sam3(frame_rgb, text_prompt=text_prompt)
+        return self._select_best_mask(masks, scores, points=points, labels=labels)
+
+    def segment_with_text_box_and_points(
+        self,
+        frame_rgb: np.ndarray,
+        text_prompt: str,
+        box_xyxy: BoxData,
+        points: np.ndarray,
+        labels: np.ndarray,
+    ) -> np.ndarray:
+        masks, scores = self._run_sam3(frame_rgb, text_prompt=text_prompt, box_xyxy=box_xyxy)
+        return self._select_best_mask(masks, scores, box_xyxy=box_xyxy, points=points, labels=labels)
+
+    def mask_to_polygon(self, mask: np.ndarray) -> PolygonData:
+        import cv2
+
+        m = (np.asarray(mask) > 0).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(m, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return []
+        largest = max(contours, key=cv2.contourArea)
+        if self.polygon_simplification <= 0:
+            simplified = largest
+        else:
+            epsilon = self.polygon_simplification * cv2.arcLength(largest, True)
+            simplified = cv2.approxPolyDP(largest, epsilon, True)
+        return [(float(pt[0][0]), float(pt[0][1])) for pt in simplified]
 
-        contour = max(contours, key=cv2.contourArea)
-        epsilon = self.polygon_simplification * cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, epsilon, True)
+    @staticmethod
+    def mask_to_box(mask: np.ndarray) -> BoxData:
+        import cv2
 
-        points = []
-        for p in approx.reshape(-1, 2):
-            points.append((float(p[0]), float(p[1])))
-
-        return points
-
-    def _normalize_points(self, points):
-        arr = np.asarray(points, dtype=np.float32)
-
-        if arr.ndim == 1:
-            arr = arr.reshape(1, 2)
-
-        if arr.shape[-1] != 2:
-            raise ValueError(f"points 형식이 잘못되었습니다: {points}")
-
-        return arr
-
-    def _normalize_box(self, box):
-        arr = np.asarray(box, dtype=np.float32).reshape(-1)
-
-        if arr.size != 4:
-            raise ValueError(f"box는 [x1, y1, x2, y2] 형식이어야 합니다: {box}")
-
-        return arr.reshape(1, 4)
-
-    def _to_pil_image(self, image):
-        if isinstance(image, Image.Image):
-            return image.convert("RGB")
-
-        if isinstance(image, str):
-            return Image.open(image).convert("RGB")
-
-        if isinstance(image, np.ndarray):
-            arr = image
-
-            if arr.ndim == 2:
-                return Image.fromarray(arr).convert("RGB")
-
-            if arr.ndim == 3 and arr.shape[2] == 4:
-                arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2RGB)
-
-            return Image.fromarray(arr.astype(np.uint8)).convert("RGB")
-
-        raise TypeError(f"지원하지 않는 image 형식입니다: {type(image)}")
-
-    def _to_numpy(self, value):
-        if value is None:
-            return None
-
-        if torch.is_tensor(value):
-            return value.detach().cpu().numpy()
-
-        return np.asarray(value)
+        m = (np.asarray(mask) > 0).astype(np.uint8)
+        contours, _ = cv2.findContours(m, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return (0.0, 0.0, 0.0, 0.0)
+        all_points = np.vstack(contours)
+        x, y, w, h = cv2.boundingRect(all_points)
+        return (float(x), float(y), float(w), float(h))
