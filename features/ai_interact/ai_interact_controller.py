@@ -139,6 +139,15 @@ class AIInteractControllerMixin:
             self._confirm_ai_interact_annotation()
             return
 
+        # SAM3 text-only 실행:
+        # SAM3 선택 후 text prompt만 입력한 상태에서 Interact를 한 번 더 누르면
+        # point/box 없이 text prompt만으로 segmentation을 수행한다.
+        if self.ai_interact_pending and self.ai_pending_mask is None:
+            pending_model = str(getattr(self, "ai_pending_model_type", "") or "")
+            if pending_model == "sam3" and self._current_ai_text_prompt():
+                self._execute_ai_single_frame_interact()
+                return
+
         if not self._ensure_cuda_ready():
             return
         if self.source is None or self.current_index < 0:
@@ -163,12 +172,15 @@ class AIInteractControllerMixin:
         self.ai_pending_mask = None
         self.ai_pending_polygon = None
 
+        text_prompt = self._current_ai_text_prompt() if model_type == "sam3" else ""
+        text_hint = " 텍스트만 사용할 경우 Interact를 한 번 더 누르세요." if text_prompt else ""
+
         if prompt_mode == "box":
             self.canvas.set_mode("box")
-            self.show_status_message("AI Interact 대기: 대상 물체를 박스로 드래그하세요.")
+            self.show_status_message(f"AI Interact 대기: 대상 물체를 박스로 드래그하세요.{text_hint}")
         else:
             self.canvas.set_mode("ai_point")
-            self.show_status_message("AI Interact 대기: 대상 물체를 점으로 클릭하세요.")
+            self.show_status_message(f"AI Interact 대기: 대상 물체를 점으로 클릭하세요.{text_hint}")
         # 여기까지 수정했다: 기존 단일 checkbox 대신 bbox/pointer 선택값으로 시작 방식을 정한다.
         if self.ai_interact_button is not None:
             self.ai_interact_button.setText("Confirm")
@@ -255,6 +267,113 @@ class AIInteractControllerMixin:
             prompt_box=prompt_box,
         )
 
+
+    def _current_ai_text_prompt(self) -> str:
+        """SAM3 text prompt 입력칸의 현재 값을 안전하게 읽는다."""
+        candidate_names = (
+            "ai_text_prompt_input",
+            "ai_sam3_text_prompt_input",
+            "sam3_text_prompt_input",
+            "ai_text_input",
+        )
+
+        for name in candidate_names:
+            widget = getattr(self, name, None)
+            if widget is None:
+                continue
+            try:
+                return str(widget.text()).strip()
+            except Exception:
+                pass
+
+        return ""
+
+    def _sam3_weight_path(self) -> str:
+        """프로젝트에서 사용할 SAM3 weight 경로를 반환한다."""
+        from pathlib import Path
+
+        candidates = (
+            Path("weights/sam3/sam3.pt"),
+            Path("weights/sam3.pt"),
+        )
+        for path in candidates:
+            if path.exists():
+                return str(path)
+
+        # 존재하지 않아도 기본값을 반환해서 engine 쪽 FileNotFoundError 메시지가 명확하게 나오게 한다.
+        return str(candidates[0])
+
+    def _extract_ai_mask_from_output(self, output):
+        """
+        SAM3 engine 결과에서 최종 mask 하나를 꺼낸다.
+
+        지원 형식:
+        - mask ndarray 단독
+        - {"masks": ..., "scores": ...} dict
+        - Ultralytics Results list/object
+        """
+        import numpy as np
+
+        if output is None:
+            return None
+
+        masks = None
+        scores = None
+
+        if isinstance(output, dict):
+            masks = output.get("masks")
+            scores = output.get("scores")
+        elif isinstance(output, (list, tuple)):
+            # Ultralytics Results list 또는 mask list 대응
+            if len(output) == 0:
+                return None
+            first = output[0]
+            if hasattr(first, "masks") and getattr(first.masks, "data", None) is not None:
+                masks = first.masks.data
+                if getattr(first, "boxes", None) is not None and getattr(first.boxes, "conf", None) is not None:
+                    scores = first.boxes.conf
+            else:
+                masks = output
+        elif hasattr(output, "masks") and getattr(output.masks, "data", None) is not None:
+            masks = output.masks.data
+            if getattr(output, "boxes", None) is not None and getattr(output.boxes, "conf", None) is not None:
+                scores = output.boxes.conf
+        else:
+            masks = output
+
+        if masks is None:
+            return None
+
+        try:
+            import torch
+            if torch.is_tensor(masks):
+                masks = masks.detach().cpu().numpy()
+            if torch.is_tensor(scores):
+                scores = scores.detach().cpu().numpy()
+        except Exception:
+            pass
+
+        masks = np.asarray(masks)
+
+        if masks.ndim == 0:
+            return None
+
+        if masks.ndim == 2:
+            return masks
+
+        # [N, H, W] 또는 [1, N, H, W] 대응
+        if masks.ndim == 4 and masks.shape[0] == 1:
+            masks = masks[0]
+
+        if masks.ndim == 3:
+            if scores is not None:
+                scores = np.asarray(scores).reshape(-1)
+                if len(scores) == masks.shape[0]:
+                    return masks[int(np.argmax(scores))]
+            return masks[0]
+
+        return masks.squeeze()
+
     def _execute_ai_single_frame_interact(
         self,
         prompt_points=None,
@@ -267,7 +386,7 @@ class AIInteractControllerMixin:
             import numpy as np
 
             if self.ai_pending_model_type == "sam3":
-                from features.ai_interact.ai_interact_engine_sam3 import SAM3ImageInteractEngine
+                from features.ai_interact.ai_interact_engine_sam3 import SAM3ImageInteractEngine as SAM3EngineClass
             else:
                 from features.ai_interact.ai_interact_engine import SAMImageInteractEngine
 
@@ -295,27 +414,30 @@ class AIInteractControllerMixin:
 
         try:
             if self.ai_pending_model_type == "sam3":
-                engine = SAM3ImageInteractEngine(
-                    model_path="weights/sam3/sam3.pt",
+                engine = SAM3EngineClass(
+                    model_path=self._sam3_weight_path(),
                     device="cuda",
                     polygon_simplification=self._ai_interact_polygon_simplification_value(),
                 )
 
-                text_prompt = ""
-                if getattr(self, "ai_text_prompt_input", None) is not None:
-                    text_prompt = self.ai_text_prompt_input.text().strip()
+                text_prompt = self._current_ai_text_prompt()
 
-                # SAM3는 text prompt가 있으면 우선 사용
-                if text_prompt:
-                    mask = engine.segment_with_text(frame, text_prompt)
-                elif prompt_box is not None and prompt_points is not None and prompt_labels is not None:
-                    mask = engine.segment_with_box_and_points(frame, prompt_box, prompt_points, prompt_labels)
-                elif prompt_box is not None:
-                    mask = engine.segment_with_box(frame, prompt_box)
-                elif prompt_points is not None and prompt_labels is not None:
-                    mask = engine.segment_with_points(frame, prompt_points, prompt_labels)
-                else:
-                    raise RuntimeError("SAM3 프롬프트가 없습니다.")
+                has_points = prompt_points is not None and prompt_labels is not None and len(prompt_points) > 0
+                has_box = prompt_box is not None
+                has_text = bool(text_prompt)
+
+                if not has_points and not has_box and not has_text:
+                    raise RuntimeError("SAM3 프롬프트가 없습니다. 점, 박스 또는 텍스트를 입력하세요.")
+
+                # Meta SAM3 engine: point / box / text를 동시에 넘긴다.
+                # text가 visual prompt를 대체하지 않고 추가 조건으로 같이 전달된다.
+                mask = engine.segment_with_prompts(
+                    image=frame,
+                    points=prompt_points if has_points else None,
+                    labels=prompt_labels if has_points else None,
+                    box=prompt_box if has_box else None,
+                    text_prompt=text_prompt if has_text else None,
+                )
 
             else:
                 engine = SAMImageInteractEngine(
@@ -545,9 +667,10 @@ class AIInteractControllerMixin:
             self.ai_interact_button.setText("Interact")
 
     def _is_sam3_available(self) -> bool:
-        """현재 설치 환경에서 SAM3 비디오 예측기 불러오기가 가능한지 확인한다."""
+        """현재 설치 환경에서 Meta SAM3 이미지 엔진을 불러올 수 있는지 확인한다."""
         try:
-            from sam2.build_sam import build_sam3_video_predictor  # noqa: F401
+            from sam3.model_builder import build_sam3_image_model  # noqa: F401
+            from sam3.model.sam3_image_processor import Sam3Processor  # noqa: F401
             return True
         except Exception:
             return False
